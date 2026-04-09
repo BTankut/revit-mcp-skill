@@ -1,0 +1,77 @@
+{
+  "skill_name": "revit-mcp",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Revit modelindeki tüm boruların sistem tipi ve nominal çapına göre metrajını (BOQ) çıkar. Her grup için toplam uzunluğu metre cinsinden göster.",
+      "expected_output": "A correct C# script body that collects all Pipe elements using Autodesk.Revit.DB.Plumbing.Pipe (fully qualified), reads RBS_SYSTEM_TYPE_PARAM and RBS_PIPE_DIAMETER_PARAM and CURVE_ELEM_LENGTH, converts to meters using UnitTypeId.Meters, groups by system+diameter into a Dictionary, uses string.Format (no interpolation), wraps in try-catch, ends with return.",
+      "files": [],
+      "assertions": [
+        "Code uses Autodesk.Revit.DB.Plumbing.Pipe as fully qualified type name",
+        "Code does NOT contain class or method definitions",
+        "Code uses string.Format instead of $\"...\" string interpolation",
+        "FilteredElementCollector includes .WhereElementIsNotElementType()",
+        "Unit conversion uses UnitTypeId.Meters (not DisplayUnitType)",
+        "RBS_PIPE_DIAMETER_PARAM or RBS_PIPE_OUTER_DIAMETER is used for pipe diameter",
+        "CURVE_ELEM_LENGTH is used for pipe length",
+        "Code groups results using a Dictionary with fully qualified type System.Collections.Generic.Dictionary",
+        "Code is wrapped in try-catch returning HATA/ERROR string on exception",
+        "Code ends with a return statement",
+        "uiApp and doc are NOT redeclared"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Modeldeki tüm HVAC kanallarını sistem tipine ve boyutuna (dikdörtgen WxH veya yuvarlak Ø) göre gruplandırarak toplam uzunluklarını m cinsinden listele.",
+      "expected_output": "A correct C# script body that collects Duct elements using Autodesk.Revit.DB.Mechanical.Duct (fully qualified), reads system type, duct width/height (rectangular) and diameter (round) parameters, converts units using UnitTypeId, groups into Dictionary, outputs formatted list using string.Format, wrapped in try-catch.",
+      "files": [],
+      "assertions": [
+        "Code uses Autodesk.Revit.DB.Mechanical.Duct as fully qualified type name",
+        "Code does NOT contain class or method definitions",
+        "Code reads RBS_DUCT_WIDTH_PARAM and RBS_DUCT_HEIGHT_PARAM for rectangular ducts",
+        "Code reads RBS_DUCT_DIAMETER_PARAM for round ducts",
+        "Code uses string.Format instead of string interpolation",
+        "FilteredElementCollector includes .WhereElementIsNotElementType()",
+        "Unit conversion uses UnitTypeId (not DisplayUnitType)",
+        "Code groups results using System.Collections.Generic.Dictionary (fully qualified)",
+        "Code is wrapped in try-catch returning error string on exception",
+        "Code ends with a return statement"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Her boru sistemindeki toplam basınç kaybını hesapla. Sürtünme kaybı (Pa/m) ile uzunluğu (m) çarparak segment bazlı hesap yap, sistem bazında topla ve sonuçları sırala.",
+      "expected_output": "A correct C# script body that collects Pipe elements, reads RBS_FRICTION (friction per meter) and CURVE_ELEM_LENGTH, converts using UnitTypeId.PascalsPerMeter and UnitTypeId.Meters, multiplies friction * length per segment, accumulates by system name using Dictionary, outputs sorted results with string.Format, wrapped in try-catch.",
+      "files": [],
+      "assertions": [
+        "Code uses Autodesk.Revit.DB.Plumbing.Pipe as fully qualified type name",
+        "Code reads RBS_FRICTION parameter for friction loss",
+        "Code reads CURVE_ELEM_LENGTH for pipe length",
+        "Code converts friction using UnitTypeId (not DisplayUnitType)",
+        "Code multiplies friction rate by length to get segment pressure loss",
+        "Code accumulates pressure loss by system using Dictionary",
+        "Code uses string.Format instead of string interpolation",
+        "Code is wrapped in try-catch returning error string on exception",
+        "Code ends with a return statement",
+        "uiApp and doc are NOT redeclared"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Modeldeki tüm sprinkler başlıklarını kata göre say ve toplam adet olarak listele.",
+      "expected_output": "A correct C# script body that uses FilteredElementCollector with OfCategory(BuiltInCategory.OST_Sprinklers) and OfClass(typeof(FamilyInstance)), reads fi.Level.Name for each sprinkler, counts by level using Dictionary, outputs with string.Format, wrapped in try-catch.",
+      "files": [],
+      "assertions": [
+        "Code uses OST_Sprinklers as the category filter",
+        "Code uses OfClass(typeof(FamilyInstance))",
+        "Code does NOT contain class or method definitions",
+        "Code reads fi.Level.Name or equivalent for level grouping",
+        "Code groups by level using System.Collections.Generic.Dictionary (fully qualified)",
+        "Code uses string.Format instead of string interpolation",
+        "FilteredElementCollector includes .WhereElementIsNotElementType()",
+        "Code is wrapped in try-catch returning error string on exception",
+        "Code ends with a return statement"
+      ]
+    }
+  ]
+}
