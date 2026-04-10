@@ -1,151 +1,122 @@
-# Revit MCP — Kurulum Talimatı (Claude Code)
+# Revit MCP - Upstream `mcp-servers-for-revit` Kurulum Talimatı
 
-Bu repo, Revit ile Claude Code arasında MCP bağlantısı kurmak için gereken **tüm dosyaları** içerir.
-Herhangi bir dış bağlantıya veya ek indirmeye gerek yoktur.
+Bu repo artık eski `SampleCommandSet` / `Custom_DLL` / yerel `mcp-server` hattını kullanmaz.
+Kurulum, resmi upstream release ZIP'i ve npm paketi üzerinden yapılır.
 
 ## Gereksinimler
 
 - Windows 10/11
-- Autodesk Revit 2022 (veya 2023/2024 — ilgili adımlarda sürümü güncelle)
-- Node.js v18 veya üzeri → https://nodejs.org
-- Claude Code CLI → https://claude.ai/code
+- Autodesk Revit 2022, 2023, 2024, 2025 veya 2026
+- Node.js 18+
+- Codex CLI
 
----
+## Adım 1 - Upstream release paketini kur
 
-## Adım 1 — Revit Eklentisini Kur
-
-`kurulum/revit-plugin/` klasöründeki kurulum dosyasını çalıştır:
-
-```
-revit-mcp-plugin_Setup_v1.0.1.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-```
-
-> Yönetici yetkisiyle çalıştırmanı öneririz.
-
----
-
-## Adım 2 — Özel DLL Dosyalarını Yerleştir
-
-`kurulum/Custom_DLL/` klasöründeki iki dosyayı Revit eklenti dizinine kopyala:
-
-**Revit 2022 için:**
-
-```
-SampleCommandSet.dll  →  %APPDATA%\Autodesk\Revit\Addins\2022\Commands\SampleCommandset\2022\SampleCommandSet.dll
-command.json          →  %APPDATA%\Autodesk\Revit\Addins\2022\Commands\SampleCommandset\command.json
-```
-
-> Revit 2023 için `2022` → `2023`, Revit 2024 için `2022` → `2024` yap.
-
----
-
-## Adım 3 — commandRegistry.json Dosyasını Güncelle
-
-```
-%APPDATA%\Autodesk\Revit\Addins\2022\Commands\commandRegistry.json
-```
-
-dosyasını aç ve `"Commands"` dizisine şu bloğu **ekle** (var olanları silme):
-
-```json
-{
-  "commandName": "send_code_to_revit",
-  "assemblyPath": "SampleCommandSet\\2022\\SampleCommandSet.dll",
-  "enabled": true,
-  "supportedRevitVersions": ["2022"],
-  "developer": {
-    "name": "revit-mcp",
-    "email": "",
-    "website": "",
-    "organization": "revit-mcp"
-  },
-  "description": "Send C# code to Revit for execution"
-}
-```
-
-> Revit 2023/2024 için `"2022"` değerlerini güncelle.
-
----
-
-## Adım 4 — MCP Sunucusunu Kur
-
-`kurulum/mcp-server/` klasörünü istediğin bir konuma kopyala (örn. `C:\Projects\revit-mcp\`):
+Repo içindeki PowerShell script'ini çalıştır:
 
 ```powershell
-# mcp-server klasörünü hedef konuma kopyala
-xcopy /E /I kurulum\mcp-server C:\Projects\revit-mcp
-
-# Bağımlılıkları yükle
-cd C:\Projects\revit-mcp
-npm install --omit=dev
+powershell -ExecutionPolicy Bypass -File .\kurulum\install-upstream-release.ps1 -RevitVersion 2022
 ```
 
----
+Script şu işleri yapar:
 
-## Adım 5 — Claude Code'a MCP Sunucusunu Ekle
+1. `mcp-servers-for-revit` projesinin en güncel release bilgisini alır
+2. Seçtiğin Revit sürümüne uygun ZIP paketini indirir
+3. `%APPDATA%\Autodesk\Revit\Addins\<version>\` altına açar
+4. Varsa duplikat `revit-mcp.addin` dosyasını pasifleştirir
+5. Varsa boş `commandRegistry.json` dosyasını `command.json` manifest'inden üretir
 
-```bash
-claude mcp add --scope user revit-mcp -- node "C:\Projects\revit-mcp\build\index.js"
+## Adım 2 - Revit içinde komutları etkinleştir
+
+1. Revit'i aç
+2. İlk açılışta add-in için güven uyarısı gelirse `Always Load` seç
+3. Şeritte `mcp-servers-for-revit` sekmesini aç
+4. `Settings` düğmesine tıkla
+5. Kullanmak istediğin komutları işaretle
+6. `Save` ile kaydet
+
+Not: `say_hello`, `get_current_view_info`, `get_current_view_elements`, `analyze_model_statistics` ve `send_code_to_revit` açık olmalı.
+
+## Adım 3 - Codex CLI tarafına MCP server ekle
+
+```powershell
+codex mcp add revit-mcp -- cmd /c npx -y mcp-server-for-revit
 ```
 
 Doğrulama:
 
-```bash
-claude mcp list
+```powershell
+codex mcp list
 ```
 
-Çıktıda `revit-mcp: ... ✓ Connected` görmelisin.
+Listede şu satıra benzer bir kayıt görmelisin:
 
----
+```text
+revit-mcp    cmd    /c npx -y mcp-server-for-revit
+```
 
-## Adım 6 — Revit'te Bağlantıyı Aktif Et
+## Adım 4 - Skill'i Codex'e yükle
 
-1. Revit'i aç
-2. **Add-Ins** sekmesine git
-3. **MCP service switch** butonuna tıkla (bağlantıyı başlatır)
-
----
-
-## Adım 7 — Skill'i Claude Code'a Yükle
-
-Bu repodaki `SKILL.md` dosyası Claude Code için hazır bir skill içerir.
-Claude Code'un skill dizinine kopyala:
+Repo kökünü Codex skill dizinine kopyala:
 
 ```powershell
-xcopy /E /I . "%USERPROFILE%\.claude\skills\revit-mcp"
+xcopy /E /I /Y . "%USERPROFILE%\.codex\skills\revit-mcp"
 ```
 
-Veya Claude Code içinden `/mcp` → skill ekle adımlarını izle.
+Ardından Codex içinde:
 
----
-
-## Test
-
-Revit açıkken Claude Code'da şunu dene:
-
-```
-Revit'te aktif görünümdeki kanal sayısını söyle
+```text
+/skills reload
 ```
 
-Claude, `mcp_revit-mcp_send_code_to_revit` aracını kullanarak Revit'e bağlanacak ve cevap dönecektir.
+## Adım 5 - Test
 
----
+Önce temel bağlantıyı test et:
 
-## Repo İçeriği
-
+```text
+Revit'e hello gönder.
 ```
-revit-mcp-skill/
-├── SKILL.md                          ← Claude Code skill (MEP otomasyon kuralları)
-├── evals/evals.json                  ← Test senaryoları
-└── kurulum/
-    ├── KURULUM.md                    ← Bu dosya
-    ├── revit-plugin/
-    │   └── revit-mcp-plugin_Setup_v1.0.1.exe   ← Revit eklenti kurulumu
-    ├── Custom_DLL/
-    │   ├── SampleCommandSet.dll      ← Dinamik C# derleyici eklentisi
-    │   └── command.json              ← Komut konfigürasyonu
-    └── mcp-server/
-        ├── build/                    ← Derlenmiş Node.js sunucusu
-        ├── package.json
-        └── package-lock.json
+
+Sonra okuma testi:
+
+```text
+Aktif görünüm bilgisini getir.
 ```
+
+Sonra işlevsel test:
+
+```text
+Modeldeki kanal metraj tablosunu çıkar.
+```
+
+## Sorun giderme
+
+### 1. `Duplicated AddInId`
+
+Aynı GUID'e sahip iki `.addin` dosyası yükleniyordur.
+Kurulum script'i bunu otomatik düzeltir. Yine de sürerse `%APPDATA%\Autodesk\Revit\Addins\<version>` altında birden fazla `revit-mcp*.addin` dosyası olup olmadığını kontrol et.
+
+### 2. `Method 'say_hello' not found`
+
+Plugin yüklenmiş ama komut registry boş kalmış olabilir.
+Kurulum script'i `commandRegistry.json` dosyasını otomatik üretir. Script'i tekrar çalıştırıp Revit'i yeniden başlat.
+
+### 3. `send_code_to_revit` içinde `doc does not exist`
+
+Bu eski skill sözleşmesidir. Güncel upstream sözleşmesi şudur:
+
+```csharp
+public static object Execute(Document document, object[] parameters)
+```
+
+Kod içinde `document` kullan.
+
+## Bu repoda artık ne yok?
+
+Eski ve artık kullanılmayan içerikler repo yapısından çıkarıldı:
+
+- `kurulum/revit-plugin/`
+- `kurulum/Custom_DLL/`
+- `kurulum/mcp-server/`
+
+Bu klasörler upstream modelinde resmi kaynak değil; zamanla bayatladıkları için yanlış kurulumlara neden oluyordu.
