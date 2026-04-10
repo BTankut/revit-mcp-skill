@@ -1,46 +1,65 @@
-# Revit MCP - Upstream `mcp-servers-for-revit` Kurulum Talimatı
+# Revit MCP - Self-Contained Codex Kurulumu
 
-Bu repo artık eski `SampleCommandSet` / `Custom_DLL` / yerel `mcp-server` hattını kullanmaz.
-Kurulum, resmi upstream release ZIP'i ve npm paketi üzerinden yapılır.
+Bu repo, kurulum için gereken ana payload'ları repo içinde taşır.
+Harici release ZIP indirme veya `npx -y mcp-server-for-revit` akışı kullanılmaz.
 
-## Gereksinimler
+## Kapsam
 
-- Windows 10/11
-- Autodesk Revit 2022, 2023, 2024, 2025 veya 2026
-- Node.js 18+
-- Codex CLI
+Bu paket şu iki şeyi bundled olarak sağlar:
 
-## Adım 1 - Upstream release paketini kur
+1. Revit 2022 için upstream tabanlı add-in payload'u
+2. Yerel çalışacak prebuilt Node.js MCP server build'i
 
-Repo içindeki PowerShell script'ini çalıştır:
+## Hızlı yol
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\kurulum\install-upstream-release.ps1 -RevitVersion 2022
+powershell -ExecutionPolicy Bypass -File .\kurulum\install-self-contained.ps1 -RevitVersion 2022 -ServerTarget C:\Projects\revit-mcp
+cd C:\Projects\revit-mcp
+npm install --omit=dev
+codex mcp add revit-mcp -- node "C:\Projects\revit-mcp\build\index.js"
 ```
 
-Script şu işleri yapar:
+## Manuel kurulum
 
-1. `mcp-servers-for-revit` projesinin en güncel release bilgisini alır
-2. Seçtiğin Revit sürümüne uygun ZIP paketini indirir
-3. `%APPDATA%\Autodesk\Revit\Addins\<version>\` altına açar
-4. Varsa duplikat `revit-mcp.addin` dosyasını pasifleştirir
-5. Varsa boş `commandRegistry.json` dosyasını `command.json` manifest'inden üretir
+### 1. Revit plugin payload'unu kopyala
 
-## Adım 2 - Revit içinde komutları etkinleştir
+Aşağıdaki bundled içeriği `%APPDATA%\Autodesk\Revit\Addins\2022\` altına kopyala:
 
-1. Revit'i aç
-2. İlk açılışta add-in için güven uyarısı gelirse `Always Load` seç
-3. Şeritte `mcp-servers-for-revit` sekmesini aç
-4. `Settings` düğmesine tıkla
-5. Kullanmak istediğin komutları işaretle
-6. `Save` ile kaydet
+```text
+kurulum\revit-plugin\mcp-servers-for-revit.addin
+kurulum\revit-plugin\revit_mcp_plugin\...
+```
 
-Not: `say_hello`, `get_current_view_info`, `get_current_view_elements`, `analyze_model_statistics` ve `send_code_to_revit` açık olmalı.
+Eğer aynı klasörde eski `revit-mcp.addin` varsa, çakışmayı önlemek için adını değiştir:
 
-## Adım 3 - Codex CLI tarafına MCP server ekle
+```text
+revit-mcp.addin -> revit-mcp.addin.disabled
+```
+
+### 2. Gerekirse command set'i elle onar
+
+Repo içindeki `kurulum\Custom_DLL\` klasörü command set yedeğidir.
+Normal kurulumda buna gerek yoktur. Ama command registry veya command DLL bozulursa şu dosyaları referans al:
+
+```text
+kurulum\Custom_DLL\RevitMCPCommandSet.dll
+kurulum\Custom_DLL\command.json
+```
+
+Bu dosyalar, bundled plugin içindeki `RevitMCPCommandSet` payload'unun aynısıdır.
+
+### 3. Yerel MCP server'ı kopyala
 
 ```powershell
-codex mcp add revit-mcp -- cmd /c npx -y mcp-server-for-revit
+xcopy /E /I /Y kurulum\mcp-server C:\Projects\revit-mcp
+cd C:\Projects\revit-mcp
+npm install --omit=dev
+```
+
+### 4. Codex CLI'a MCP server ekle
+
+```powershell
+codex mcp add revit-mcp -- node "C:\Projects\revit-mcp\build\index.js"
 ```
 
 Doğrulama:
@@ -49,15 +68,9 @@ Doğrulama:
 codex mcp list
 ```
 
-Listede şu satıra benzer bir kayıt görmelisin:
+Listede `revit-mcp` satırını görmelisin.
 
-```text
-revit-mcp    cmd    /c npx -y mcp-server-for-revit
-```
-
-## Adım 4 - Skill'i Codex'e yükle
-
-Repo kökünü Codex skill dizinine kopyala:
+### 5. Skill'i Codex'e yükle
 
 ```powershell
 xcopy /E /I /Y . "%USERPROFILE%\.codex\skills\revit-mcp"
@@ -69,54 +82,35 @@ Ardından Codex içinde:
 /skills reload
 ```
 
-## Adım 5 - Test
+### 6. Revit'te komutları aç
 
-Önce temel bağlantıyı test et:
+1. Revit'i aç
+2. `mcp-servers-for-revit` sekmesine git
+3. `Settings` düğmesine tıkla
+4. En az şu komutları aç:
+   - `say_hello`
+   - `get_current_view_info`
+   - `get_current_view_elements`
+   - `analyze_model_statistics`
+   - `send_code_to_revit`
+5. `Save` de
 
-```text
-Revit'e hello gönder.
-```
+## Test sırası
 
-Sonra okuma testi:
+1. `hello` testi
+2. aktif görünüm bilgisi testi
+3. `analyze_model_statistics`
+4. `send_code_to_revit` ile küçük okuma snippet'i
+5. kanal metraj tablosu
 
-```text
-Aktif görünüm bilgisini getir.
-```
+## Bu pakette ne güncellendi?
 
-Sonra işlevsel test:
+- repo tekrar self-contained dağıtım modeline döndü
+- plugin payload'u çalışan upstream kurulumdan vendor edildi
+- local MCP wrapper `transactionMode` parametresini geçirir hale getirildi
+- `SKILL.md` upstream `document / parameters` sözleşmesiyle senkron tutuldu
 
-```text
-Modeldeki kanal metraj tablosunu çıkar.
-```
+## Sınır
 
-## Sorun giderme
-
-### 1. `Duplicated AddInId`
-
-Aynı GUID'e sahip iki `.addin` dosyası yükleniyordur.
-Kurulum script'i bunu otomatik düzeltir. Yine de sürerse `%APPDATA%\Autodesk\Revit\Addins\<version>` altında birden fazla `revit-mcp*.addin` dosyası olup olmadığını kontrol et.
-
-### 2. `Method 'say_hello' not found`
-
-Plugin yüklenmiş ama komut registry boş kalmış olabilir.
-Kurulum script'i `commandRegistry.json` dosyasını otomatik üretir. Script'i tekrar çalıştırıp Revit'i yeniden başlat.
-
-### 3. `send_code_to_revit` içinde `doc does not exist`
-
-Bu eski skill sözleşmesidir. Güncel upstream sözleşmesi şudur:
-
-```csharp
-public static object Execute(Document document, object[] parameters)
-```
-
-Kod içinde `document` kullan.
-
-## Bu repoda artık ne yok?
-
-Eski ve artık kullanılmayan içerikler repo yapısından çıkarıldı:
-
-- `kurulum/revit-plugin/`
-- `kurulum/Custom_DLL/`
-- `kurulum/mcp-server/`
-
-Bu klasörler upstream modelinde resmi kaynak değil; zamanla bayatladıkları için yanlış kurulumlara neden oluyordu.
+Bu bundled plugin payload şu an Revit 2022 içindir.
+2023+ sürümler için aynı modelle ayrı payload vendor etmek gerekir.

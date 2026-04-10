@@ -1,0 +1,349 @@
+﻿{
+    "Commands":  [
+                     {
+                         "commandName":  "say_hello",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Displays a greeting dialog"
+                     },
+                     {
+                         "commandName":  "get_available_family_types",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "get available family types"
+                     },
+                     {
+                         "commandName":  "get_current_view_elements",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "get current view elements"
+                     },
+                     {
+                         "commandName":  "get_current_view_info",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "get current view info"
+                     },
+                     {
+                         "commandName":  "get_selected_elements",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "get selected elements"
+                     },
+                     {
+                         "commandName":  "create_point_based_element",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create point-based elements like furniture"
+                     },
+                     {
+                         "commandName":  "create_line_based_element",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create line based element such as wall"
+                     },
+                     {
+                         "commandName":  "create_surface_based_element",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create surface-based elements like floors"
+                     },
+                     {
+                         "commandName":  "color_splash",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Color elements by parameter value"
+                     },
+                     {
+                         "commandName":  "tag_walls",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Tag all the walls in the model"
+                     },
+                     {
+                         "commandName":  "delete_element",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Deletes elements using ElementId"
+                     },
+                     {
+                         "commandName":  "ai_element_filter",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "AI element filter for querying elements by criteria"
+                     },
+                     {
+                         "commandName":  "operate_element",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Operate on elements (select, color, hide, isolate, etc)"
+                     },
+                     {
+                         "commandName":  "export_room_data",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Extract all rooms with detailed properties including area, volume, perimeter, and parameters"
+                     },
+                     {
+                         "commandName":  "get_material_quantities",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Calculate material quantities and takeoffs with area and volume calculations per material"
+                     },
+                     {
+                         "commandName":  "analyze_model_statistics",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Analyze model complexity with element counts by category, type, family, and level"
+                     },
+                     {
+                         "commandName":  "create_grid",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create grid system with smart spacing generation for project layout (alphabetic/numeric naming)"
+                     },
+                     {
+                         "commandName":  "create_structural_framing_system",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create structural beam framing system with configurable spacing and direction"
+                     },
+                     {
+                         "commandName":  "create_room",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create and place rooms at specified locations with custom names, numbers, and properties"
+                     },
+                     {
+                         "commandName":  "tag_rooms",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create tags for all rooms in the current view displaying room name and number"
+                     },
+                     {
+                         "commandName":  "create_level",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create levels at specified elevations with automatic floor plan view generation"
+                     },
+                     {
+                         "commandName":  "send_code_to_revit",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Execute dynamic C# code in Revit with access to the Document and Revit API"
+                     },
+                     {
+                         "commandName":  "create_dimensions",
+                         "assemblyPath":  "RevitMCPCommandSet\\\\2022\\\\RevitMCPCommandSet.dll",
+                         "enabled":  true,
+                         "supportedRevitVersions":  [
+                                                        "2022"
+                                                    ],
+                         "developer":  {
+                                           "name":  "mcp-servers-for-revit",
+                                           "email":  "",
+                                           "website":  "",
+                                           "organization":  "mcp-servers-for-revit"
+                                       },
+                         "description":  "Create dimension annotations between elements or points in the current view"
+                     }
+                 ]
+}

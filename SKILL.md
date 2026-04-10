@@ -82,48 +82,58 @@ PipeAccessory -> OfCategory(BuiltInCategory.OST_PipeAccessory) + FamilyInstance
 ## 4. FilteredElementCollector Desenleri
 
 ```csharp
+// Tüm kanallar:
 new FilteredElementCollector(document)
     .OfClass(typeof(Autodesk.Revit.DB.Mechanical.Duct))
     .WhereElementIsNotElementType();
 
+// Aktif görünümdeki kanallar:
 new FilteredElementCollector(document, document.ActiveView.Id)
     .OfClass(typeof(Autodesk.Revit.DB.Mechanical.Duct))
     .WhereElementIsNotElementType();
 
+// Tüm borular:
 new FilteredElementCollector(document)
     .OfClass(typeof(Autodesk.Revit.DB.Plumbing.Pipe))
     .WhereElementIsNotElementType();
 
+// Kanal armatürleri:
 new FilteredElementCollector(document)
     .OfCategory(BuiltInCategory.OST_DuctFitting)
     .OfClass(typeof(FamilyInstance))
     .WhereElementIsNotElementType();
 
+// Kanal aksesuarları:
 new FilteredElementCollector(document)
     .OfCategory(BuiltInCategory.OST_DuctAccessory)
     .OfClass(typeof(FamilyInstance))
     .WhereElementIsNotElementType();
 
+// Boru armatürleri:
 new FilteredElementCollector(document)
     .OfCategory(BuiltInCategory.OST_PipeFitting)
     .OfClass(typeof(FamilyInstance))
     .WhereElementIsNotElementType();
 
+// Boru aksesuarları:
 new FilteredElementCollector(document)
     .OfCategory(BuiltInCategory.OST_PipeAccessory)
     .OfClass(typeof(FamilyInstance))
     .WhereElementIsNotElementType();
 
+// Sprinkler başlıkları:
 new FilteredElementCollector(document)
     .OfCategory(BuiltInCategory.OST_Sprinklers)
     .OfClass(typeof(FamilyInstance))
     .WhereElementIsNotElementType();
 
+// Hava terminalleri:
 new FilteredElementCollector(document)
     .OfCategory(BuiltInCategory.OST_DuctTerminal)
     .OfClass(typeof(FamilyInstance))
     .WhereElementIsNotElementType();
 
+// Mekanik ekipman:
 new FilteredElementCollector(document)
     .OfCategory(BuiltInCategory.OST_MechanicalEquipment)
     .OfClass(typeof(FamilyInstance))
@@ -141,8 +151,7 @@ new FilteredElementCollector(document)
 Kanal BuiltInParameter'larının büyük çoğunluğu dinamik derleyicide güvenilir değildir.
 Kanal için varsayılan yaklaşım `LookupParameter(name)` kullanmaktır.
 
-Sık kullanılan kanal parametreleri:
-
+Örnekler:
 - `Diameter`
 - `Width`
 - `Height`
@@ -161,8 +170,7 @@ Sık kullanılan kanal parametreleri:
 
 ### Boru - BuiltInParameter kullan
 
-Boru tarafında tipik olarak güvenilir parametreler:
-
+Boru tarafında şu parametreler tipik olarak güvenilirdir:
 - `RBS_PIPE_OUTER_DIAMETER`
 - `RBS_PIPE_INNER_DIAM_PARAM`
 - `RBS_PIPE_DIAMETER_PARAM`
@@ -175,7 +183,6 @@ Boru tarafında tipik olarak güvenilir parametreler:
 - `RBS_REFERENCE_INSULATION_THICKNESS`
 
 Derlemeyen boru BIP'lerinde `LookupParameter(...)` kullan:
-
 - `RBS_PIPE_SLOPE_PARAM` -> `LookupParameter("Slope")`
 - `RBS_SYSTEM_TYPE_PARAM` -> `LookupParameter("System Type")`
 
@@ -209,7 +216,8 @@ double lps = UnitUtils.ConvertFromInternalUnits(val, UnitTypeId.LitersPerSecond)
 double ms  = UnitUtils.ConvertFromInternalUnits(val, UnitTypeId.MetersPerSecond);
 double pam = UnitUtils.ConvertFromInternalUnits(val, UnitTypeId.PascalsPerMeter);
 double pa  = UnitUtils.ConvertFromInternalUnits(val, UnitTypeId.Pascals);
-double ft  = UnitUtils.ConvertToInternalUnits(200.0, UnitTypeId.Millimeters);
+
+double ft = UnitUtils.ConvertToInternalUnits(200.0, UnitTypeId.Millimeters);
 ```
 
 ---
@@ -257,7 +265,6 @@ catch (Exception ex)
 ## 9. Sistem Sınıflandırması
 
 `LookupParameter("System Classification")` tipik değerleri:
-
 - `Supply Air`
 - `Return Air`
 - `Exhaust Air`
@@ -267,7 +274,6 @@ catch (Exception ex)
 `LookupParameter("System Name")` sistem örneği adını verir.
 
 Boru sistemlerinde `LookupParameter("System Type").AsValueString()` tipik değerleri:
-
 - `Domestic Cold Water`
 - `Domestic Hot Water`
 - `Sanitary`
