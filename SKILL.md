@@ -493,3 +493,130 @@ catch (Exception ex)
 - [ ] `try/catch` bloğu mevcut.
 - [ ] Kod `return` ile bitiyor.
 - [ ] Yazma işlemlerinde transaction modu düşünüldü: varsayılan `auto`, manuel yönetimde `none`.
+## Skill Addendum - Tool Priority And Real-World Workflow
+
+This addendum overrides weaker defaults when a real project workflow requires a more direct approach.
+
+### Default Tool Priority
+
+The default primary tool should be `mcp_revit-mcp_send_code_to_revit`.
+
+Treat these tools as lightweight helpers for context gathering only:
+
+- `get_selected_elements`
+- `get_current_view_info`
+- `get_current_view_elements`
+
+Use `send_code_to_revit` immediately for:
+
+- linked model queries
+- room matching
+- nearest-room fallback
+- custom export logic
+- instance/type parameter fallback
+- bulk extraction
+- performance-sensitive workflows
+- CSV or XLSX reporting
+
+### Linked Model And Room Matching
+
+In MEP models, room data often lives in a linked architectural model instead of the host document.
+
+Default workflow:
+
+1. Find the target `RevitLinkInstance`.
+2. Call `GetLinkDocument()` once and validate that it is loaded.
+3. Convert the host point into link coordinates with `linkInstance.GetTransform().Inverse.OfPoint(...)`.
+4. Try `GetRoomAtPoint(...)` first.
+5. If that fails, apply a nearest-room fallback.
+6. If the active view is a plan view, lock the match to the active level.
+7. Filter rooms by level so equipment does not jump to the wrong floor.
+
+Important:
+
+- In an `L05` workflow, matching to an `L06` room is usually a bug.
+- Prefer XY distance on the same level for nearest-room fallback.
+- Free 3D distance often produces incorrect floor-to-floor matches.
+
+### Parameter Lookup Order
+
+When reading a parameter, follow this order:
+
+1. `LookupParameter("ExactName")`
+2. common casing variants
+3. instance parameter
+4. type parameter via `fi.Symbol.LookupParameter(...)`
+5. `AsString()`
+6. `AsValueString()`
+7. numeric fallback with `AsDouble()` or `AsInteger()` when needed
+
+Pay extra attention to:
+
+- `FAM_Text2`
+- `fam_text2`
+- shared parameters
+- parameters that appear only after sync
+
+### Performance Patterns For Bulk Queries
+
+Avoid these anti-patterns in large models:
+
+- scanning every room again for each equipment instance
+- resolving the same link in every loop
+- resolving the same parameter names repeatedly
+- rescanning every linked model for each FCU
+
+Preferred pattern:
+
+1. resolve the target link once
+2. build the target-level room list once
+3. cache room centers, `Room_Number`, and `ATP_Room_Number`
+4. match equipment against that cache
+
+### Export And Excel Safety
+
+For CSV or Excel output:
+
+- use `;` as the delimiter for Turkish Excel compatibility
+- keep locale-sensitive numeric columns numeric
+- keep date-like room identifiers as text
+
+Usually keep these fields as text:
+
+- `ATP_Room_Number`
+- `Room_Number`
+- `Mark`
+- unique identity fields
+
+Usually keep these fields numeric:
+
+- `Cooling_kW`
+- flow
+- pressure
+- area
+- length
+
+### Identity And Round Trip Keys
+
+`Mark` is not always unique.
+
+For exports that may be edited later, include:
+
+- `Mark`
+- `ElementId`
+- `Unique_Mark = Mark_ElementId`
+
+### Debug Workflow
+
+For extraction and room-matching tasks, use this order:
+
+1. verify the active view
+2. verify the selected element
+3. check whether the target parameter is instance or type
+4. verify that the link is loaded
+5. verify point extraction
+6. inspect the direct `GetRoomAtPoint(...)` result
+7. verify level lock behavior
+8. test nearest-room fallback on one element
+9. validate on a small sample
+10. run the full export only after the sample is correct
