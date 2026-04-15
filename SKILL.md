@@ -501,7 +501,7 @@ This addendum overrides weaker defaults when a real project workflow requires a 
 
 The default primary tool should be `mcp_revit-mcp_send_code_to_revit`.
 
-Treat these tools as lightweight helpers for context gathering only:
+Only these four bundled tools are expected to exist, and the last three are lightweight helpers:
 
 - `get_selected_elements`
 - `get_current_view_info`

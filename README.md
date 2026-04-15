@@ -63,50 +63,22 @@ revit-mcp-skill/
     `-- mcp-server/
 ```
 
-## Default MCP tool profile
+## Bundled tool surface
 
-The recommended default MCP tool profile is now `core`.
-
-Goal:
-
-- reduce prompt/context bloat
-- keep only high-value helper tools in the default interface
-- let `send_code_to_revit` handle real work
-
-Recommended `core` profile:
+This package intentionally exposes exactly four tools across every layer:
 
 - `send_code_to_revit`
 - `get_selected_elements`
 - `get_current_view_info`
 - `get_current_view_elements`
 
-This is the best practical tradeoff between capability and context cost.
+This same four-tool set is reflected in:
 
-## Tool profiles
+- the Node MCP wrapper
+- the bundled Revit command payload
+- the installer-copied command registry
 
-The MCP registry should no longer auto-register every tool file by default.
-
-It should use a manifest-driven profile system instead.
-
-Recommended profiles:
-
-- `core`
-- `analysis`
-- `editing`
-- `authoring`
-- `full`
-
-Manifest files:
-
-- `kurulum/mcp-server/build/tools/tool-manifest.json`
-
-Active profile can be selected with:
-
-```powershell
-$env:REVIT_MCP_TOOL_PROFILE = "core"
-```
-
-If not set, the server should fall back to `core`.
+There are no additional tool profiles in the bundled distribution.
 
 ## Why `send_code_to_revit` stays primary
 
@@ -138,14 +110,9 @@ That is why `send_code_to_revit` should remain the first-class tool in both the 
 
 ## Installer note
 
-The self-contained installer should also copy the `Custom_DLL` payload so dynamic code execution works after a clean install without manual DLL repair steps.
+The self-contained installer also copies the `Custom_DLL` payload so dynamic code execution works after a clean install without manual DLL repair steps.
 
-That means `install-self-contained.ps1` should copy:
-
-- `RevitMCPCommandSet.dll`
-- `command.json`
-
-into the expected LocalAppData and Revit add-in command locations during setup.
+The copied command manifests are kept in sync with the same four bundled tools.
 
 ## Note
 

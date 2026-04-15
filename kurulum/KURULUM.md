@@ -87,21 +87,20 @@ Ardından Codex içinde:
 1. Revit'i aç
 2. `mcp-servers-for-revit` sekmesine git
 3. `Settings` düğmesine tıkla
-4. En az şu komutları aç:
-   - `say_hello`
+4. Bu paket yalnızca şu dört komutu içerir:
+   - `get_selected_elements`
    - `get_current_view_info`
    - `get_current_view_elements`
-   - `analyze_model_statistics`
    - `send_code_to_revit`
 5. `Save` de
 
 ## Test sırası
 
-1. `hello` testi
-2. aktif görünüm bilgisi testi
-3. `analyze_model_statistics`
+1. aktif görünüm bilgisi testi
+2. seçili eleman testi
+3. aktif görünüm elemanları testi
 4. `send_code_to_revit` ile küçük okuma snippet'i
-5. kanal metraj tablosu
+5. gerçek model sorgusu veya rapor testi
 
 ## Bu pakette ne güncellendi?
 
@@ -109,6 +108,7 @@ Ardından Codex içinde:
 - plugin payload'u çalışan upstream kurulumdan vendor edildi
 - local MCP wrapper `transactionMode` parametresini geçirir hale getirildi
 - `SKILL.md` upstream `document / parameters` sözleşmesiyle senkron tutuldu
+- tüm katmanlar aynı dört tool'a indirildi
 
 ## Sınır
 
