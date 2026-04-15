@@ -19,6 +19,30 @@ Copy-Item -LiteralPath (Join-Path $pluginSource "mcp-servers-for-revit.addin") -
 Copy-Item -LiteralPath (Join-Path $pluginSource "revit_mcp_plugin") -Destination (Join-Path $addinRoot "revit_mcp_plugin") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $serverSource "*") -Destination $ServerTarget -Recurse -Force
 
+# Copy Custom_DLL payload so dynamic command compilation works after install.
+$customDllDir = Join-Path $PSScriptRoot "Custom_DLL"
+if (Test-Path $customDllDir) {
+    # 1. LocalAppData command locations
+    $localAppCmdSet2022 = Join-Path $env:LOCALAPPDATA "revit-mcp-plugin\commands\CommandSet\$RevitVersion"
+    $localAppCmdSet = Join-Path $env:LOCALAPPDATA "revit-mcp-plugin\commands\CommandSet"
+
+    New-Item -ItemType Directory -Path $localAppCmdSet2022 -Force | Out-Null
+
+    # Copy files into LocalAppData
+    Copy-Item -Path (Join-Path $customDllDir "RevitMCPCommandSet.dll") -Destination $localAppCmdSet2022 -Force
+    Copy-Item -Path (Join-Path $customDllDir "command.json") -Destination $localAppCmdSet2022 -Force
+    Copy-Item -Path (Join-Path $customDllDir "command.json") -Destination $localAppCmdSet -Force
+
+    # 2. Mirror the same files into the Revit add-in command folders
+    $roamingCmdSet2022 = Join-Path $addinRoot "revit_mcp_plugin\Commands\RevitMCPCommandSet\$RevitVersion"
+    $roamingCmdSet = Join-Path $addinRoot "revit_mcp_plugin\Commands\RevitMCPCommandSet"
+
+    New-Item -ItemType Directory -Path $roamingCmdSet2022 -Force | Out-Null
+    Copy-Item -Path (Join-Path $customDllDir "RevitMCPCommandSet.dll") -Destination $roamingCmdSet2022 -Force
+    Copy-Item -Path (Join-Path $customDllDir "command.json") -Destination $roamingCmdSet2022 -Force
+    Copy-Item -Path (Join-Path $customDllDir "command.json") -Destination $roamingCmdSet -Force
+}
+
 $duplicateAddin = Join-Path $addinRoot "revit-mcp.addin"
 if (Test-Path $duplicateAddin) {
     $disabled = Join-Path $addinRoot "revit-mcp.addin.disabled-self-contained"

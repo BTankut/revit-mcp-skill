@@ -1,35 +1,34 @@
-# Revit MCP Skill Paketi - Self-Contained ve Upstream Uyumlu
+# Revit MCP Skill Package - Self-Contained And Upstream Aligned
 
-Bu repo, Revit MCP kurulumunu repo içindeki dosyalarla yapar.
-`npx`, release ZIP indirme veya ayrı bir GitHub clone akışı zorunlu değildir.
-Revit plugin payload'u ve yerel MCP server build'i repo içinde vendor edilir.
+This repo packages a Revit MCP skill, bundled plugin payload, and bundled local MCP server build in one place.
 
-## Bu repo ne sağlar?
+It is designed so the skill can be installed and used without forcing a separate upstream clone flow.
 
-- `SKILL.md`: Codex için Revit MEP skill'i
-- `kurulum/revit-plugin/`: çalışan upstream tabanlı Revit add-in payload'u (Revit 2022)
-- `kurulum/Custom_DLL/`: command set DLL + manifest yedeği
-- `kurulum/mcp-server/`: prebuilt yerel Node.js MCP server
-- `kurulum/install-self-contained.ps1`: bundled kurulum script'i
-- `evals/evals.json`: güncel `send_code_to_revit` sözleşmesine göre eval seti
+## What this repo provides
 
-## Teknik yönelim
+- `SKILL.md`: Codex skill instructions for Revit MEP work
+- `kurulum/revit-plugin/`: bundled Revit add-in payload
+- `kurulum/Custom_DLL/`: command set DLL and manifest backup
+- `kurulum/mcp-server/`: bundled local MCP server build
+- `kurulum/install-self-contained.ps1`: self-contained installer script
+- `evals/evals.json`: eval set aligned to the current `send_code_to_revit` contract
 
-Repo self-contained dağıtım modelini korur, ama teknik sözleşmeyi güncel upstream çizgisine taşır:
+## Technical direction
 
-- `send_code_to_revit` artık `Execute(Document document, object[] parameters)` beklentisine göre dokümante edilir
-- bundled Revit payload, çalışan `mcp-servers-for-revit` kurulumundan vendor edilmiştir
-- bundled Node wrapper, `transactionMode` alanını da geçirir
-- `analyze_model_statistics` gibi yeni komutlar bundled command registry içinde yer alır
+This repo stays self-contained, but keeps its execution contract aligned with current upstream Revit MCP behavior:
 
-## Gereksinimler
+- `send_code_to_revit` expects code for `Execute(Document document, object[] parameters)`
+- the bundled Revit payload is vendor-copied from a working upstream-compatible installation
+- the bundled Node wrapper forwards `transactionMode`
 
-- Windows 10/11
+## Requirements
+
+- Windows 10 or 11
 - Autodesk Revit 2022
 - Node.js 18+
 - Codex CLI
 
-## Hızlı başlangıç
+## Quick start
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\kurulum\install-self-contained.ps1 -RevitVersion 2022 -ServerTarget C:\Projects\revit-mcp
@@ -38,15 +37,15 @@ npm install --omit=dev
 codex mcp add revit-mcp -- node "C:\Projects\revit-mcp\build\index.js"
 ```
 
-Sonra:
+Then:
 
-1. Revit'i aç
-2. `mcp-servers-for-revit` sekmesindeki `Settings` düğmesine tıkla
-3. Kullanmak istediğin komutları işaretle ve `Save` de
-4. Bu repo kökünü `%USERPROFILE%\.codex\skills\revit-mcp` altına kopyala
-5. Codex içinde `/skills reload` çalıştır
+1. Open Revit.
+2. Click `Settings` in the `mcp-servers-for-revit` ribbon tab.
+3. Enable the commands you want and save.
+4. Copy this repo root into `%USERPROFILE%\.codex\skills\revit-mcp`.
+5. Run `/skills reload` inside Codex.
 
-## Repo yapısı
+## Repo layout
 
 ```text
 revit-mcp-skill/
@@ -64,7 +63,96 @@ revit-mcp-skill/
     `-- mcp-server/
 ```
 
-## Not
+## Default MCP tool profile
 
-Bu repo dağıtım tarafında self-contained kalır. Yani Revit plugin payload'u ve MCP server build'i repoda bulunur.
-Node bağımlılıkları yine de hedef makinede `npm install --omit=dev` ile kurulmalıdır.
+The recommended default MCP tool profile is now `core`.
+
+Goal:
+
+- reduce prompt/context bloat
+- keep only high-value helper tools in the default interface
+- let `send_code_to_revit` handle real work
+
+Recommended `core` profile:
+
+- `send_code_to_revit`
+- `get_selected_elements`
+- `get_current_view_info`
+- `get_current_view_elements`
+
+This is the best practical tradeoff between capability and context cost.
+
+## Tool profiles
+
+The MCP registry should no longer auto-register every tool file by default.
+
+It should use a manifest-driven profile system instead.
+
+Recommended profiles:
+
+- `core`
+- `analysis`
+- `editing`
+- `authoring`
+- `full`
+
+Manifest files:
+
+- `kurulum/mcp-server/build/tools/tool-manifest.json`
+
+Active profile can be selected with:
+
+```powershell
+$env:REVIT_MCP_TOOL_PROFILE = "core"
+```
+
+If not set, the server should fall back to `core`.
+
+## Why `send_code_to_revit` stays primary
+
+Real Revit tasks usually need:
+
+- linked model lookup
+- room matching
+- nearest room fallback
+- custom filtering
+- type/instance parameter fallback
+- bulk export
+- CSV/XLSX output safety
+
+In practice, one strong custom-code tool performs better than a large set of narrow tools.
+
+That is why `send_code_to_revit` should remain the first-class tool in both the MCP setup and the skill.
+
+## Skill update direction
+
+`SKILL.md` should strongly document:
+
+- use `send_code_to_revit` first for non-trivial tasks
+- linked model and room matching workflow
+- parameter lookup order
+- bulk-query performance patterns
+- export and Excel safety rules
+- `Mark` + `ElementId` + `Unique_Mark` identity strategy
+- single-element -> small sample -> full export debug flow
+
+## Installer note
+
+The self-contained installer should also copy the `Custom_DLL` payload so dynamic code execution works after a clean install without manual DLL repair steps.
+
+That means `install-self-contained.ps1` should copy:
+
+- `RevitMCPCommandSet.dll`
+- `command.json`
+
+into the expected LocalAppData and Revit add-in command locations during setup.
+
+## Note
+
+This repo remains self-contained for distribution. The Revit plugin payload and MCP server build are vendored here.
+
+Node dependencies still need to be installed on the target machine with:
+
+```powershell
+npm install --omit=dev
+```

@@ -1,37 +1,70 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-export async function registerTools(server) {
-    // 获取当前文件的目录路径
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
-    // 读取tools目录下的所有文件
-    const files = fs.readdirSync(__dirname);
-    // 过滤出.ts或.js文件，但排除index文件和register文件
-    const toolFiles = files.filter((file) => (file.endsWith(".ts") || file.endsWith(".js")) &&
+
+function loadToolManifest(manifestPath) {
+    if (!fs.existsSync(manifestPath)) {
+        throw new Error(`Tool manifest not found: ${manifestPath}`);
+    }
+    const manifestText = fs.readFileSync(manifestPath, "utf8");
+    const manifest = JSON.parse(manifestText);
+    if (!manifest || typeof manifest !== "object" || !manifest.profiles) {
+        throw new Error(`Invalid tool manifest: ${manifestPath}`);
+    }
+    return manifest;
+}
+
+function getAvailableToolNames(toolsDir) {
+    return new Set(fs
+        .readdirSync(toolsDir)
+        .filter((file) => (file.endsWith(".ts") || file.endsWith(".js")) &&
         file !== "index.ts" &&
         file !== "index.js" &&
         file !== "register.ts" &&
-        file !== "register.js");
-    // 动态导入并注册每个工具
-    for (const file of toolFiles) {
-        try {
-            // 构建导入路径
-            const importPath = `./${file.replace(/\.(ts|js)$/, ".js")}`;
-            // 动态导入模块
-            const module = await import(importPath);
-            // 查找并执行注册函数
-            const registerFunctionName = Object.keys(module).find((key) => key.startsWith("register") && typeof module[key] === "function");
-            if (registerFunctionName) {
-                module[registerFunctionName](server);
-                console.error(`已注册工具: ${file}`);
-            }
-            else {
-                console.warn(`警告: 在文件 ${file} 中未找到注册函数`);
-            }
-        }
-        catch (error) {
-            console.error(`注册工具 ${file} 时出错:`, error);
-        }
+        file !== "register.js")
+        .map((file) => file.replace(/\.(ts|js)$/, "")));
+}
+
+function getRegisterFunction(module, toolName) {
+    const registerFunctionName = Object.keys(module).find((key) => key.startsWith("register") && typeof module[key] === "function");
+    if (!registerFunctionName) {
+        throw new Error(`No register function found for tool: ${toolName}`);
     }
+    return module[registerFunctionName];
+}
+
+export async function registerTools(server) {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const manifestPath = path.join(__dirname, "tool-manifest.json");
+    const manifest = loadToolManifest(manifestPath);
+    const defaultProfile = manifest.defaultProfile || "core";
+    const requestedProfile = process.env.REVIT_MCP_TOOL_PROFILE
+        ? process.env.REVIT_MCP_TOOL_PROFILE.trim()
+        : "";
+    let activeProfile = requestedProfile || defaultProfile;
+    if (!manifest.profiles[activeProfile]) {
+        console.warn(`Unknown REVIT_MCP_TOOL_PROFILE="${activeProfile}". Falling back to "${defaultProfile}".`);
+        activeProfile = defaultProfile;
+    }
+    const requestedTools = manifest.profiles[activeProfile];
+    if (!Array.isArray(requestedTools) || requestedTools.length === 0) {
+        throw new Error(`Tool profile "${activeProfile}" is empty.`);
+    }
+    const availableTools = getAvailableToolNames(__dirname);
+    const uniqueTools = [...new Set(requestedTools)];
+    let registeredCount = 0;
+    console.error(`Revit MCP tool profile: ${activeProfile}`);
+    for (const toolName of uniqueTools) {
+        if (!availableTools.has(toolName)) {
+            throw new Error(`Tool "${toolName}" listed in profile "${activeProfile}" was not found in ${__dirname}`);
+        }
+        const importPath = `./${toolName}.js`;
+        const module = await import(importPath);
+        const registerTool = getRegisterFunction(module, toolName);
+        registerTool(server);
+        registeredCount++;
+        console.error(`Registered tool [${activeProfile}]: ${toolName}`);
+    }
+    console.error(`Registered ${registeredCount} Revit MCP tools for profile "${activeProfile}"`);
 }
