@@ -518,6 +518,38 @@ Use `send_code_to_revit` immediately for:
 - performance-sensitive workflows
 - CSV or XLSX reporting
 
+### API Reference Fallback
+
+When the exact Revit API surface is uncertain, use the separate `revit-api-docs` MCP server before writing code.
+
+Use the docs tools for:
+
+- exact class discovery
+- method overload lookup
+- property or event verification
+- namespace exploration
+- parameter type confirmation
+- return type confirmation
+- XML summary or remarks lookup when the API meaning is unclear
+
+Preferred docs tool order:
+
+1. `search_api` for broad discovery
+2. `get_type_details` when the target type is known
+3. `get_member_details` when an exact method, property, field, constructor, or event must be verified
+4. `list_namespace` when exploring an API area
+
+Do not guess API names or overloads when the docs server can confirm them.
+
+Typical workflow:
+
+1. resolve the exact API symbol with `revit-api-docs`
+2. confirm the signature, parameters, and XML summary
+3. write the Revit snippet with `mcp_revit-mcp_send_code_to_revit`
+
+Treat `revit-api-docs` as the authoritative source for signatures and XML comments.
+Treat `send_code_to_revit` as the execution path once the API surface is confirmed.
+
 ### Linked Model And Room Matching
 
 In MEP models, room data often lives in a linked architectural model instead of the host document.
