@@ -17,7 +17,8 @@ New-Item -ItemType Directory -Path $ServerTarget -Force | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $pluginSource "mcp-servers-for-revit.addin") -Destination (Join-Path $addinRoot "mcp-servers-for-revit.addin") -Force
 Copy-Item -LiteralPath (Join-Path $pluginSource "revit_mcp_plugin") -Destination (Join-Path $addinRoot "revit_mcp_plugin") -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $serverSource "*") -Destination $ServerTarget -Recurse -Force
+# Expand the bundled server contents into the target directory.
+Copy-Item -Path (Join-Path $serverSource "*") -Destination $ServerTarget -Recurse -Force
 
 # Copy Custom_DLL payload so dynamic command compilation works after install.
 $customDllDir = Join-Path $PSScriptRoot "Custom_DLL"
