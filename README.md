@@ -45,6 +45,62 @@ Then:
 4. Copy this repo root into `%USERPROFILE%\.codex\skills\revit-mcp`.
 5. Run `/skills reload` inside Codex.
 
+## What the installer deploys
+
+The files under `kurulum/` are source payloads kept in the repo for redistribution.
+After install, the same payload is copied into the real system locations below:
+
+- Revit add-in manifest:
+  - `%APPDATA%\Autodesk\Revit\Addins\2022\mcp-servers-for-revit.addin`
+- Revit add-in payload:
+  - `%APPDATA%\Autodesk\Revit\Addins\2022\revit_mcp_plugin\...`
+- Dynamic command payload mirror:
+  - `%LOCALAPPDATA%\revit-mcp-plugin\commands\CommandSet\...`
+- Local MCP server bundle:
+  - the `-ServerTarget` path you chose, for example `C:\Projects\revit-mcp`
+
+The installer removes any previous `%APPDATA%\Autodesk\Revit\Addins\2022\revit_mcp_plugin` tree before copying, so the add-in payload is not left nested under `revit_mcp_plugin\revit_mcp_plugin`.
+
+## Clean machine checklist
+
+Use this order on a fresh machine:
+
+1. Install the prerequisites:
+   - Autodesk Revit 2022
+   - Node.js 18+
+   - Codex CLI
+2. Clone or download this repo.
+3. Run the installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\kurulum\install-self-contained.ps1 -RevitVersion 2022 -ServerTarget C:\Projects\revit-mcp
+```
+
+4. Install Node dependencies in the deployed server target:
+
+```powershell
+cd C:\Projects\revit-mcp
+npm install --omit=dev
+```
+
+5. Register the MCP server in Codex:
+
+```powershell
+codex mcp add revit-mcp -- node "C:\Projects\revit-mcp\build\index.js"
+```
+
+6. Install the skill last:
+   - copy this repo root to `%USERPROFILE%\.codex\skills\revit-mcp`
+   - run `/skills reload`
+7. Open Revit and enable the bundled commands from the `mcp-servers-for-revit` ribbon `Settings` button.
+
+Expected bundled commands:
+
+- `send_code_to_revit`
+- `get_selected_elements`
+- `get_current_view_info`
+- `get_current_view_elements`
+
 ## Repo layout
 
 ```text
