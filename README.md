@@ -10,6 +10,7 @@ It is designed so the skill can be installed and used without forcing a separate
 - `kurulum/revit-plugin/`: bundled Revit add-in payload
 - `kurulum/Custom_DLL/`: command set DLL and manifest backup
 - `kurulum/mcp-server/`: bundled local MCP server build
+- `kurulum/revit-api-docs-mcp/`: optional local MCP server for Revit API DLL + XML documentation search
 - `kurulum/install-self-contained.ps1`: self-contained installer script
 - `evals/evals.json`: eval set aligned to the current `send_code_to_revit` contract
 
@@ -101,6 +102,33 @@ Expected bundled commands:
 - `get_current_view_info`
 - `get_current_view_elements`
 
+## Optional Revit API docs server
+
+This repo also includes a separate MCP server that reads the installed Revit API assemblies and XML doc files directly from the local Revit installation.
+
+It is intentionally kept separate from the four-tool runtime server so the live Revit tool surface stays minimal.
+
+Install it separately when you want local API lookup:
+
+```powershell
+cd .\kurulum\revit-api-docs-mcp
+npm install --omit=dev
+codex mcp add revit-api-docs -- node "C:\Projects\Revit MCP\kurulum\revit-api-docs-mcp\build\index.js"
+```
+
+On first query, the docs server builds a local cache from the installed `RevitAPI*.dll` and matching `RevitAPI*.xml` files under the Revit install folder.
+
+Default cache path:
+
+- `%LOCALAPPDATA%\revit-api-docs-mcp\cache`
+
+Bundled docs tools:
+
+- `search_api`
+- `get_type_details`
+- `get_member_details`
+- `list_namespace`
+
 ## Repo layout
 
 ```text
@@ -112,6 +140,7 @@ revit-mcp-skill/
 `-- kurulum/
     |-- KURULUM.md
     |-- install-self-contained.ps1
+    |-- revit-api-docs-mcp/
     |-- revit-plugin/
     |   |-- mcp-servers-for-revit.addin
     |   `-- revit_mcp_plugin/

@@ -1,0 +1,28 @@
+{
+  "name": "revit-api-docs-mcp",
+  "version": "1.0.0",
+  "description": "Local MCP server for querying Revit API assemblies and XML documentation.",
+  "main": "build/index.js",
+  "type": "module",
+  "bin": {
+    "revit-api-docs-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "build-index": "powershell -ExecutionPolicy Bypass -File ./scripts/build-index.ps1"
+  },
+  "files": [
+    "build",
+    "scripts"
+  ],
+  "keywords": [
+    "revit",
+    "mcp",
+    "api-docs"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0",
+    "zod": "^3.24.2"
+  }
+}
