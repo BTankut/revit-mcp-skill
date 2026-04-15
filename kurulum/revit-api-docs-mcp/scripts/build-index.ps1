@@ -25,8 +25,14 @@ function Get-XmlNodeText {
         return ""
     }
 
+    if ($Node -is [string]) {
+        return Normalize-Whitespace $Node
+    }
+
     if ($Node -is [System.Array]) {
-        return Normalize-Whitespace (($Node | ForEach-Object { $_.InnerText }) -join " ")
+        return Normalize-Whitespace (($Node | ForEach-Object {
+                    if ($_ -is [string]) { $_ } else { $_.InnerText }
+                }) -join " ")
     }
 
     return Normalize-Whitespace $Node.InnerText
@@ -233,8 +239,8 @@ function Get-ParameterPayload {
     param([System.Reflection.ParameterInfo[]]$Parameters, $DocEntry)
 
     $parameterDocs = @{}
-    if ($null -ne $DocEntry -and $null -ne $DocEntry.params) {
-        foreach ($param in $DocEntry.params) {
+    if ($null -ne $DocEntry -and $null -ne $DocEntry.param) {
+        foreach ($param in @($DocEntry.param)) {
             $parameterDocs[[string]$param.name] = Get-XmlNodeText $param
         }
     }
@@ -251,7 +257,7 @@ function Get-ParameterPayload {
             })
     }
 
-    return $items
+    return @($items.ToArray())
 }
 
 $assemblyPairs = Get-ChildItem -LiteralPath $RevitRoot -Filter "RevitAPI*.dll" |
@@ -418,14 +424,15 @@ try {
                         returns = $returnsText
                         value = $valueText
                         since = Get-XmlNodeText $docEntry.since
-                        parameters = $parameters
-                        exceptions = $exceptionEntries
+                        parameters = @($parameters)
+                        exceptions = @($exceptionEntries.ToArray())
                     })
             }
         }
     }
 
-    $payload = [ordered]@{
+$payload = [ordered]@{
+        schemaVersion = 2
         version = $Version
         sourceRoot = $RevitRoot
         builtAtUtc = [DateTime]::UtcNow.ToString("o")

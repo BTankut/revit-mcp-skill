@@ -10,6 +10,7 @@ const __dirname = path.dirname(__filename);
 const PACKAGE_ROOT = path.resolve(__dirname, "..", "..");
 const INDEX_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "build-index.ps1");
 const DEFAULT_REVIT_VERSION = "2022";
+const INDEX_SCHEMA_VERSION = 2;
 const INDEX_CACHE = new Map();
 
 function parseJson(text) {
@@ -245,7 +246,9 @@ async function loadIndex(options = {}) {
         await runIndexBuilder(config);
     }
     const raw = parseJson(await readFile(config.cacheFile, "utf8"));
-    if (raw.version !== config.revitVersion || normalize(raw.sourceRoot) !== normalize(config.rootPath)) {
+    if (raw.version !== config.revitVersion ||
+        normalize(raw.sourceRoot) !== normalize(config.rootPath) ||
+        Number(raw.schemaVersion || 0) !== INDEX_SCHEMA_VERSION) {
         await runIndexBuilder(config);
         const rebuilt = parseJson(await readFile(config.cacheFile, "utf8"));
         const hydrated = hydrateIndex(rebuilt);
