@@ -11,12 +11,16 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $pluginSource = Join-Path $PSScriptRoot "revit-plugin"
 $serverSource = Join-Path $PSScriptRoot "mcp-server"
 $addinRoot = Join-Path $env:APPDATA "Autodesk\Revit\Addins\$RevitVersion"
+$pluginTarget = Join-Path $addinRoot "revit_mcp_plugin"
 
 New-Item -ItemType Directory -Path $addinRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $ServerTarget -Force | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $pluginSource "mcp-servers-for-revit.addin") -Destination (Join-Path $addinRoot "mcp-servers-for-revit.addin") -Force
-Copy-Item -LiteralPath (Join-Path $pluginSource "revit_mcp_plugin") -Destination (Join-Path $addinRoot "revit_mcp_plugin") -Recurse -Force
+if (Test-Path $pluginTarget) {
+    Remove-Item -LiteralPath $pluginTarget -Recurse -Force
+}
+Copy-Item -LiteralPath (Join-Path $pluginSource "revit_mcp_plugin") -Destination $addinRoot -Recurse -Force
 # Expand the bundled server contents into the target directory.
 Copy-Item -Path (Join-Path $serverSource "*") -Destination $ServerTarget -Recurse -Force
 
