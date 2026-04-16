@@ -13,6 +13,8 @@ $serverSource = Join-Path $PSScriptRoot "mcp-server"
 $addinRoot = Join-Path $env:APPDATA "Autodesk\Revit\Addins\$RevitVersion"
 $pluginTarget = Join-Path $addinRoot "revit_mcp_plugin"
 $revitInstallRoot = Join-Path ${env:ProgramFiles} "Autodesk\Revit $RevitVersion"
+$customDllDir = Join-Path $PSScriptRoot "Custom_DLL"
+$bundledRuntimeDir = Join-Path $customDllDir "runtime\$RevitVersion"
 
 $runningRevit = Get-Process -Name "Revit" -ErrorAction SilentlyContinue
 if ($runningRevit) {
@@ -50,7 +52,6 @@ Copy-Item -LiteralPath (Join-Path $pluginSource "revit_mcp_plugin") -Destination
 Copy-Item -Path (Join-Path $serverSource "*") -Destination $ServerTarget -Recurse -Force
 
 # Copy Custom_DLL payload so dynamic command compilation works after install.
-$customDllDir = Join-Path $PSScriptRoot "Custom_DLL"
 if (Test-Path $customDllDir) {
     # 1. LocalAppData command locations
     $localAppCmdSet2022 = Join-Path $env:LOCALAPPDATA "revit-mcp-plugin\commands\CommandSet\$RevitVersion"
@@ -74,6 +75,7 @@ if (Test-Path $customDllDir) {
 
     # 3. Mirror the Roslyn runtime dependencies that the command set needs.
     $dependencySearchRoots = @(
+        $bundledRuntimeDir,
         $revitInstallRoot,
         (Join-Path $revitInstallRoot "AddIns\CoordinationModel"),
         (Join-Path $revitInstallRoot "AddIns\DynamoForRevit"),
@@ -87,12 +89,11 @@ if (Test-Path $customDllDir) {
         "System.Collections.Immutable.dll",
         "System.Memory.dll",
         "System.Reflection.Metadata.dll",
-        "System.Runtime.CompilerServices.Unsafe.dll"
-    )
-
-    $optionalRuntimeFiles = @(
+        "System.Runtime.CompilerServices.Unsafe.dll",
+        "System.Text.Encoding.CodePages.dll",
         "System.Threading.Tasks.Extensions.dll",
-        "System.Text.Encoding.CodePages.dll"
+        "System.Buffers.dll",
+        "System.Numerics.Vectors.dll"
     )
 
     $runtimeDestinations = @($localAppCmdSet2022, $roamingCmdSet2022)
@@ -110,20 +111,11 @@ if (Test-Path $customDllDir) {
         }
     }
 
-    foreach ($fileName in $optionalRuntimeFiles) {
-        $sourcePath = Resolve-DependencyPath -FileName $fileName -SearchRoots $dependencySearchRoots
-        if (-not $sourcePath) { continue }
-
-        foreach ($destination in $runtimeDestinations) {
-            Copy-Item -Path $sourcePath -Destination $destination -Force
-        }
-    }
-
     if ($missingRuntimeFiles.Count -gt 0) {
         throw ("Required Roslyn runtime files were not found for Revit {0}: {1}. " +
-            "This installer expects the Revit {0} installation to provide these assemblies; " +
-            "do not try to fix end-user installation by adding NuGet packages to the deployed bundle. " +
-            "Repair or reinstall Revit {0} instead.") -f $RevitVersion, ($missingRuntimeFiles -join ", ")
+            "This repo expects the exact runtime set under '{2}' or a compatible Revit {0} installation. " +
+            "Do not try to fix end-user installation by adding NuGet packages on the target machine. " +
+            "Restore the bundled runtime set or repair/reinstall Revit {0} instead.") -f $RevitVersion, ($missingRuntimeFiles -join ", "), $bundledRuntimeDir
     }
 }
 

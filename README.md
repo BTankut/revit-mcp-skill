@@ -9,6 +9,7 @@ It is designed so the skill can be installed and used without forcing a separate
 - `SKILL.md`: Codex skill instructions for Revit MEP work
 - `kurulum/revit-plugin/`: bundled Revit add-in payload
 - `kurulum/Custom_DLL/`: command set DLL and manifest backup
+- `kurulum/Custom_DLL/runtime/`: vendored Roslyn runtime set for dynamic C# execution
 - `kurulum/mcp-server/`: bundled local MCP server build
 - `kurulum/revit-api-docs-mcp/`: optional local MCP server for Revit API DLL + XML documentation search
 - `kurulum/install-self-contained.ps1`: self-contained installer script
@@ -78,10 +79,18 @@ What the command set depends on:
 - `System.Memory.dll`
 - `System.Reflection.Metadata.dll`
 - `System.Runtime.CompilerServices.Unsafe.dll`
+- `System.Text.Encoding.CodePages.dll`
+- `System.Threading.Tasks.Extensions.dll`
+- `System.Buffers.dll`
+- `System.Numerics.Vectors.dll`
 
-On a healthy Revit 2022 machine, these assemblies are already present under `C:\Program Files\Autodesk\Revit 2022\...`.
+This repo now vendors the exact runtime set under:
 
-The installer now verifies that Revit 2022 provides these files and mirrors them next to `RevitMCPCommandSet.dll` in the deployed command folders.
+- `kurulum/Custom_DLL/runtime/2022`
+
+The installer copies that bundled runtime set next to `RevitMCPCommandSet.dll` in the deployed command folders.
+
+If the bundled runtime set is missing or damaged, the installer can still fall back to compatible local files from the Revit 2022 installation.
 
 If a target machine throws a missing `Microsoft.CodeAnalysis` or similar runtime error, treat that as a machine/install problem, not as a step where the end user should run NuGet.
 
@@ -224,7 +233,7 @@ That is why `send_code_to_revit` should remain the first-class tool in both the 
 
 The self-contained installer also copies the `Custom_DLL` payload so dynamic code execution works after a clean install without manual DLL repair steps.
 
-It now also mirrors the required Roslyn runtime assemblies from the local Revit 2022 installation into the deployed command folders, and it fails early if those files are missing.
+It now also mirrors the vendored Roslyn runtime assemblies from `kurulum/Custom_DLL/runtime/2022` into the deployed command folders, with local Revit files only as a fallback.
 
 The copied command manifests are kept in sync with the same four bundled tools.
 
