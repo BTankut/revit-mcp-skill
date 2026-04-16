@@ -31,6 +31,8 @@ This repo stays self-contained, but keeps its execution contract aligned with cu
 
 ## Quick start
 
+Close Revit before running the installer.
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\kurulum\install-self-contained.ps1 -RevitVersion 2022 -ServerTarget C:\Projects\revit-mcp
 cd C:\Projects\revit-mcp
@@ -62,6 +64,29 @@ After install, the same payload is copied into the real system locations below:
 
 The installer removes any previous `%APPDATA%\Autodesk\Revit\Addins\2022\revit_mcp_plugin` tree before copying, so the add-in payload is not left nested under `revit_mcp_plugin\revit_mcp_plugin`.
 
+## Roslyn dependency model
+
+`send_code_to_revit` works through the bundled `RevitMCPCommandSet.dll`, and that DLL is already prebuilt.
+
+End-user installation from this repo does **not** require installing a separate NuGet package.
+
+What the command set depends on:
+
+- `Microsoft.CodeAnalysis.dll`
+- `Microsoft.CodeAnalysis.CSharp.dll`
+- `System.Collections.Immutable.dll`
+- `System.Memory.dll`
+- `System.Reflection.Metadata.dll`
+- `System.Runtime.CompilerServices.Unsafe.dll`
+
+On a healthy Revit 2022 machine, these assemblies are already present under `C:\Program Files\Autodesk\Revit 2022\...`.
+
+The installer now verifies that Revit 2022 provides these files and mirrors them next to `RevitMCPCommandSet.dll` in the deployed command folders.
+
+If a target machine throws a missing `Microsoft.CodeAnalysis` or similar runtime error, treat that as a machine/install problem, not as a step where the end user should run NuGet.
+
+NuGet is only relevant if you are rebuilding `RevitMCPCommandSet.dll` from source in a separate development project.
+
 ## Clean machine checklist
 
 Use this order on a fresh machine:
@@ -71,29 +96,31 @@ Use this order on a fresh machine:
    - Node.js 18+
    - Codex CLI
 2. Clone or download this repo.
-3. Run the installer:
+3. Close Revit.
+4. Run the installer:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\kurulum\install-self-contained.ps1 -RevitVersion 2022 -ServerTarget C:\Projects\revit-mcp
 ```
 
-4. Install Node dependencies in the deployed server target:
+5. Install Node dependencies in the deployed server target:
 
 ```powershell
 cd C:\Projects\revit-mcp
 npm install --omit=dev
 ```
 
-5. Register the MCP server in Codex:
+6. Register the MCP server in Codex:
 
 ```powershell
 codex mcp add revit-mcp -- node "C:\Projects\revit-mcp\build\index.js"
 ```
 
-6. Install the skill last:
+7. Install the skill last:
    - copy this repo root to `%USERPROFILE%\.codex\skills\revit-mcp`
    - run `/skills reload`
-7. Open Revit and enable the bundled commands from the `mcp-servers-for-revit` ribbon `Settings` button.
+8. Open Revit and enable the bundled commands from the `mcp-servers-for-revit` ribbon `Settings` button.
+9. If the installer stops with a Roslyn runtime error, repair the Revit 2022 installation first. Do not try to fix a normal end-user install by adding NuGet packages into the deployed bundle.
 
 Expected bundled commands:
 
@@ -196,6 +223,8 @@ That is why `send_code_to_revit` should remain the first-class tool in both the 
 ## Installer note
 
 The self-contained installer also copies the `Custom_DLL` payload so dynamic code execution works after a clean install without manual DLL repair steps.
+
+It now also mirrors the required Roslyn runtime assemblies from the local Revit 2022 installation into the deployed command folders, and it fails early if those files are missing.
 
 The copied command manifests are kept in sync with the same four bundled tools.
 
