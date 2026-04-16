@@ -67,24 +67,15 @@ Gerekli runtime assembly'leri sunlardir:
 - `System.Memory.dll`
 - `System.Reflection.Metadata.dll`
 - `System.Runtime.CompilerServices.Unsafe.dll`
-- `System.Text.Encoding.CodePages.dll`
-- `System.Threading.Tasks.Extensions.dll`
-- `System.Buffers.dll`
-- `System.Numerics.Vectors.dll`
 
-Bu repo artik exact runtime set'i su klasorde vendor eder:
+Bu dosyalar normalde `C:\Program Files\Autodesk\Revit 2022\...` altinda zaten bulunur.
 
-- `kurulum\Custom_DLL\runtime\2022`
-
-`install-self-contained.ps1` once bu bundled runtime set'i kullanir ve `RevitMCPCommandSet.dll` yanina mirror eder.
-
-Gerekirse ikinci kaynak olarak yerel Revit 2022 kurulumundaki uyumlu dosyalara bakar.
+`install-self-contained.ps1` artik bu dosyalari kontrol eder ve `RevitMCPCommandSet.dll` yanina mirror eder.
 
 Eger hedef makinede `Microsoft.CodeAnalysis` eksik hatasi aliniyorsa:
 
-1. repo icindeki `kurulum\Custom_DLL\runtime\2022` klasorunun eksiksiz geldigini dogrula
+1. Revit 2022 kurulumunu onar veya yeniden kur
 2. installer'i tekrar calistir
-3. sorun devam ederse Revit 2022 kurulumunu onar veya yeniden kur
 
 Normal son kullanici kurulumunda deployed bundle icine NuGet paketi ekleyerek sorun cozulmeye calisilmaz.
 
