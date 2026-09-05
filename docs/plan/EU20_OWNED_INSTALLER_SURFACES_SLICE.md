@@ -64,6 +64,16 @@ milestone acceptance, production publication or new live authority is implied.
 
 ## Candidate behavior and evidence boundaries
 
+Independent review of `e99474b1` identified two retained normal-startup paths
+missing from owned cleanup: `journal.db.writer.lock` from
+`RbpJournalWriterLease.Acquire`, and the empty `artifact-spool` directory from
+`RbpArtifactSpoolFileSystem.OpenForStateRoot`. The narrow successor recognizes
+exactly those paths; arbitrary spool contents and lock-name lookalikes remain
+refused. The regression opens/disposes the actual SQLite journal and Windows
+spool producers in the Bridge test project, then supplies their retained
+footprint to the native PowerShell cleanup fixture. The prior `e99474b1` gates
+remain attributed to that source; successor native/full gates are pending.
+
 The shared manifest directory is never passed to the distribution ACL writer.
 The manifest producer creates its own protected file ACL, validates a prior
 managed revAgent manifest and preserves the shared directory ACL. Distribution

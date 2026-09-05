@@ -54,7 +54,21 @@ try{
     [void][IO.Directory]::CreateDirectory($layout.CredentialDirectory);Set-RevAgentBridgeSystemOnlyAcl -Path $layout.CredentialDirectory
     [void](Write-RevAgentBridgeCredentialArtifact -Path $layout.EnrollmentArtifactPath -Bytes ([byte[]]@(1,2,3)) -GuardRoot $layout.CredentialDirectory)
     [IO.File]::WriteAllText($layout.ConfigurationPath,'public configuration fixture')
-    [IO.File]::WriteAllText($layout.JournalPath,'public journal fixture')
+    $stage='production_runtime_footprint'
+    $testProject=Join-Path $repo 'packages\bridge\tests\RevAgent.Bridge.Tests\RevAgent.Bridge.Tests.csproj'
+    $testAssembly=Join-Path $repo 'packages\bridge\tests\RevAgent.Bridge.Tests\bin\Release\net8.0\RevAgent.Bridge.Tests.dll'
+    if(-not(Test-Path -LiteralPath $testAssembly)){throw 'targeted_producer_test_build_required'}
+    $oldFixtureBase=$env:REVAGENT_OWNED_RUNTIME_FIXTURE_BASE;$oldTemp=$env:TEMP;$oldTmp=$env:TMP
+    try{
+        $env:REVAGENT_OWNED_RUNTIME_FIXTURE_BASE=$root
+        $env:TEMP=Join-Path $root 'runtime-temp';$env:TMP=$env:TEMP;[void][IO.Directory]::CreateDirectory($env:TEMP)
+        & dotnet test $testProject -c Release --no-build --no-restore --filter 'FullyQualifiedName=RevAgent.Bridge.Tests.Configuration.OwnedCleanupRuntimeFootprintTests.RealProducersLeaveRecognizedCleanStopFootprint' --results-directory (Join-Path $root 'runtime-producer-tests') --logger 'trx;LogFileName=runtime-footprint.trx' *> (Join-Path $root 'runtime-producer.log')
+        if($LASTEXITCODE -ne 0){throw 'actual_runtime_producer_test_failed'}
+    }finally{$env:REVAGENT_OWNED_RUNTIME_FIXTURE_BASE=$oldFixtureBase;$env:TEMP=$oldTemp;$env:TMP=$oldTmp}
+    $produced=Get-Content -LiteralPath (Join-Path $root 'runtime-footprint.json') -Raw|ConvertFrom-Json
+    Check ($produced.disposed -and $produced.writerLockRetained -and $produced.emptySpoolRetained -and $produced.stateRoot -ceq $layout.StateRoot) 'actual journal/spool producers disposed before cleanup'
+    Check ((Test-Path -LiteralPath ($layout.JournalPath+'.writer.lock')) -and (Test-Path -LiteralPath (Join-Path $layout.StateRoot 'artifact-spool'))) 'normal clean-stop footprint actually present'
+    $stage='owned_distribution_and_manifest'
     [IO.File]::WriteAllText((Join-Path $layout.StateRoot ('.bridge-config.json.'+[guid]::NewGuid().ToString('N')+'.tmp')),'public interrupted-write fixture')
     $contract=New-RevAgentBridgeAddinManifestContract -AssemblyPath $addin.AssemblyPath
     [IO.File]::WriteAllText($addin.ManifestPath,'foreign canonical-name fixture')
@@ -76,6 +90,10 @@ try{
     Check (Test-Path -LiteralPath $layout.HostExecutablePath) 'foreign refusal does not delete owned payload'
     Check ([IO.File]::ReadAllText($foreign) -ceq 'must survive refusal') 'foreign state preserved'
     [IO.File]::Delete($foreign)
+    $foreignSpool=Join-Path $layout.StateRoot 'artifact-spool\foreign.bin';[IO.File]::WriteAllText($foreignSpool,'must not be swept')
+    Reject {Get-RevAgentBridgeOwnedCleanupPlan -Layout $layout -RevitVersion 2022 -PackageRoot $package.PackageRoot -TrustedKeysPath $package.TrustedKeysPath} 'bridge_owned_unknown_state_path' 'unknown spool content still blocks removal'
+    Check (Test-Path -LiteralPath $foreignSpool) 'unknown spool content preserved'
+    [IO.File]::Delete($foreignSpool)
     $hostBytes=[IO.File]::ReadAllBytes($layout.HostExecutablePath);[IO.File]::WriteAllBytes($layout.HostExecutablePath,[byte[]]@(9,9,9))
     Reject {Get-RevAgentBridgeOwnedCleanupPlan -Layout $layout -RevitVersion 2022 -PackageRoot $package.PackageRoot -TrustedKeysPath $package.TrustedKeysPath} 'bridge_owned_modified_payload_file' 'modified payload blocks removal'
     Check (Test-Path -LiteralPath $addin.ManifestPath) 'modified payload refusal leaves manifest present'
@@ -122,5 +140,6 @@ try{
     $passed=$true;$stage='complete'
 }finally{
     $result=[ordered]@{passed=$passed;stage=$stage;actualElevated=$true;runtime=$PSVersionTable.PSVersion.ToString();checks=$checks.ToArray();checkCount=$checks.Count;moduleSha256=(Get-FileHash -LiteralPath $module).Hash;fixtureRoot=$root;fixtureRetainedForReview=$true;machineServiceOrModelMutation=$false}
+    if((Get-Variable testAssembly -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $testAssembly)){$result['producerTestAssemblySha256']=(Get-FileHash -LiteralPath $testAssembly).Hash}
     $result|ConvertTo-Json -Depth 7|Set-Content -LiteralPath (Join-Path $root 'native-owned-surfaces.json') -Encoding UTF8;$result|ConvertTo-Json -Depth 7
 }

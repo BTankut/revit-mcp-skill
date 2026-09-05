@@ -1161,8 +1161,11 @@ function Test-RevAgentBridgeOwnedStatePath {
     $path=$Relative.Replace('\','/')
     # Exact paths from BridgeInstallLayout; atomic residue suffixes from
     # AtomicCredentialFileWriter. Contents of credentials are never read.
-    if($Directory){return $path -eq '' -or $path -in @('credentials','reports','logs','logs/host','logs/worker','bundle-extract') -or $path -match '^bundle-extract/(revagent-bridge|revagent-bridge-host)(/[A-Za-z0-9_+.-]{1,128})?$'}
-    if($path -in @('bridge-config.json','journal.db','journal.db-wal','journal.db-shm','journal.db-journal')){return $true}
+    if($Directory){return $path -eq '' -or $path -in @('credentials','reports','logs','logs/host','logs/worker','bundle-extract','artifact-spool') -or $path -match '^bundle-extract/(revagent-bridge|revagent-bridge-host)(/[A-Za-z0-9_+.-]{1,128})?$'}
+    # RbpJournalWriterLease retains its lock file after Dispose; the carrier
+    # spool producer similarly retains its empty startup root. Carrier children
+    # remain unknown here and must not be swept as arbitrary state content.
+    if($path -in @('bridge-config.json','journal.db','journal.db-wal','journal.db-shm','journal.db-journal','journal.db.writer.lock')){return $true}
     if($path -match '^\.bridge-config\.json\.[a-f0-9]{32}\.tmp$' -or $path -match '^credentials/\.enrollment\.[a-f0-9]{32}\.tmp$'){return $true}
     if($path -match '^credentials/(machine-identity\.dpapi|machine-fingerprint\.json|device-credential\.dpapi|auth-diagnostic\.json|enrollment\.lock|enrollment\.json)(\.revagent-write\.(tmp|bak|intent)|\.revagent-restore\.tmp)?$'){return $true}
     if($path -match '^reports/(install|uninstall)-(latest|[0-9]{8}T[0-9]{6}Z)\.json$'){return $true}
