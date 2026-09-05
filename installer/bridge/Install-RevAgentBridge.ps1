@@ -305,8 +305,7 @@ try {
     $installSummary.addinManifestSha256 = $manifestContract.sha256
     [void](Invoke-RevAgentBridgeGuardedMutation -Target $addinLayout.ManifestPath -MutationAction 'write_addin_manifest' -DryRun $isDryRun -Steps $steps -Apply {
             [void](New-RevAgentBridgeGuardedDirectory -Path $addinLayout.ManifestDirectory -GuardRoot $revitAddinsGuard)
-            [void](Write-RevAgentBridgeGuardedAtomicBytes -Path $addinLayout.ManifestPath -Bytes $manifestContract.bytes -GuardRoot $addinLayout.ManifestDirectory)
-            Set-RevAgentBridgeDistributionAcl -Path $addinLayout.ManifestDirectory -IcaclsInvoker $IcaclsInvoker
+            [void](Write-RevAgentBridgeOwnedManifest -Path $addinLayout.ManifestPath -AssemblyPath $addinLayout.AssemblyPath -GuardRoot $addinLayout.ManifestDirectory -IcaclsInvoker $IcaclsInvoker)
             return $manifestContract.sha256
         }.GetNewClosure())
 

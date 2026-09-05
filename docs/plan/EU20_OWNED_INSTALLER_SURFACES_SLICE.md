@@ -47,3 +47,31 @@ Full protected preservation digest:
 Park List: none. Active time is not instrumented; measured gate times and final
 evidence will be reported without inventing actual/variance values. No
 milestone acceptance, production publication or new live authority is implied.
+
+## Candidate behavior and evidence boundaries
+
+The shared manifest directory is never passed to the distribution ACL writer.
+The manifest producer creates its own protected file ACL, validates a prior
+managed revAgent manifest and preserves the shared directory ACL. Distribution
+permissions use numeric SIDs, trusted owner/foreign-or-deny preflight,
+grant-before-inheritance ordering and exact final readback.
+
+`Uninstall-RevAgentBridge.ps1 -Scope LegacyCutover` preserves the default
+behavior. The explicit `BridgeOwned` scope requires a matching signed package,
+trusted keys and a fresh external report. Its preflight recognizes signed
+static payloads and runtime state paths from BridgeInstallLayout,
+AtomicCredentialFileWriter, RollingJsonBridgeLog and the host's dedicated
+bundle-extraction root. It refuses unknown/modified surfaces before removal,
+does not read runtime credential contents, preserves legacy anchors/config,
+and does not recreate the state root to persist its report. There is no updater
+version-history cleanup extension in this slice.
+
+The Windows PowerShell 5.1 focused suite is green. Its existing file-copy
+fixture explicitly substitutes ACL metadata/native calls and is not native
+permission evidence. The separate
+`scripts/test-eu20-owned-surfaces-native.ps1 -EvidenceRoot <fresh-private-path>`
+uses actual PS5/PS7 ACL/file operations with an ephemeral test signer/public
+payloads, a SYSTEM-owned shared parent, unrelated siblings/subdirectory,
+manifest publication/replacement, partial cleanup, foreign refusals,
+idempotency and no-mutation dry-run. Elevated execution remains pending at
+this checkpoint; no native or live installer pass is claimed before execution.

@@ -324,8 +324,20 @@ try {
     Assert-Equal @(Get-ChildItem -LiteralPath $aclChild -Force).Count 0 'Parent refusal must create no artifact or temporary file.'
 
     $icaclsCalls.Clear()
-    Set-RevAgentBridgeDistributionAcl -Path "C:\does-not-matter\Addin\2022" -IcaclsInvoker $mockInvoker
-    Assert-True (($icaclsCalls -join "|") -match "BUILTIN\\Users:\(OI\)\(CI\)RX") "Distribution ACL must grant interactive Users read+execute so Revit can load the add-in."
+    $priorReader = & (Get-Module RevAgent.BridgeInstall) { Get-Item Function:Get-Acl -ErrorAction SilentlyContinue }
+    $priorReaderBody = if ($priorReader) { $priorReader.ScriptBlock } else { $null }
+    $distributionReader = {
+        param([string]$LiteralPath,$ErrorAction)
+        if($LiteralPath -ceq $aclChild){$s=[Security.AccessControl.DirectorySecurity]::new();$s.SetSecurityDescriptorSddlForm('O:BAG:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;BU)');return $s}
+        if($priorReaderBody){return & $priorReaderBody @PSBoundParameters}
+        Microsoft.PowerShell.Security\Get-Acl -LiteralPath $LiteralPath -ErrorAction Stop
+    }.GetNewClosure()
+    Set-Item Function:global:Get-Acl -Value $distributionReader
+    try { Assert-ThrowsLike { Set-RevAgentBridgeDistributionAcl -Path $aclChild -IcaclsInvoker $mockInvoker } 'bridge_distribution_acl_verification_failed' 'No-op distribution invoker must fail final verification.' }
+    finally { if($priorReaderBody){Set-Item Function:global:Get-Acl -Value $priorReaderBody}else{& (Get-Module RevAgent.BridgeInstall) { Remove-Item Function:Get-Acl }} }
+    Assert-Equal $icaclsCalls.Count 2 'Distribution ACL must grant before removing inheritance.'
+    Assert-True ($icaclsCalls[0] -match '/grant:r' -and $icaclsCalls[1] -match '/inheritance:r') 'Distribution calls must never transiently remove the only admin access.'
+    Assert-True (($icaclsCalls -join '|') -match '\*S-1-5-32-545:\(OI\)\(CI\)RX') 'Distribution users RX must use a locale-independent SID.'
 
     # =====================================================================
     Write-Host "Test end-to-end install -DryRun: signature failure fails closed with zero mutation steps"
@@ -627,7 +639,7 @@ try {
     }
 
     # =====================================================================
-    Write-Host "Test idempotent install (non-dry-run): payload files actually land, durable machine report is written, real ACL is never touched"
+    Write-Host "Test idempotent file-copy/report fixture with substituted ACL metadata and native invoker"
     # =====================================================================
     # This is the regression test for the '*' literal-path copy bug and the
     # ReportsDirectory-guards-itself bug: it is the only test in this suite
@@ -693,11 +705,23 @@ try {
         $scratchRoots.Add($freshRefusalRoot)
         $freshRefusalLayout = Get-BridgeTempLayoutArgs -Root $freshRefusalRoot
         $freshCredentialPath = (Get-RevAgentBridgeLayout @freshRefusalLayout).CredentialDirectory
+        $distributionPaths = @()
+        foreach($argsForLayout in @($freshRefusalLayout,$realRunLayoutArgs)){
+            $l=Get-RevAgentBridgeLayout @argsForLayout;$a=Get-RevAgentBridgeAddinLayout -Layout $l -RevitVersion '2022'
+            $distributionPaths+=@($l.InstallRoot,$l.StateRoot,$a.AddinBinRoot,$a.ManifestPath)
+        }
         $fixtureAclReader = {
             param([string]$LiteralPath, $ErrorAction)
             if ($LiteralPath -in @($realRunFixtureLayout.CredentialDirectory, $freshCredentialPath)) {
                 $security = [Security.AccessControl.DirectorySecurity]::new()
                 $security.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)')
+                return $security
+            }
+            if($LiteralPath -in $distributionPaths){
+                $directory=(Get-Item -LiteralPath $LiteralPath -Force).PSIsContainer
+                $security=if($directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
+                $flags=if($directory){'OICI'}else{''}
+                $security.SetSecurityDescriptorSddlForm("O:BAG:BAD:P(A;$flags;FA;;;SY)(A;$flags;FA;;;BA)(A;$flags;0x1200a9;;;BU)")
                 return $security
             }
             if ($null -ne $priorGlobalAclReaderBody) { return & $priorGlobalAclReaderBody @PSBoundParameters }
@@ -712,7 +736,7 @@ try {
         catch { $freshRefused = $true }
         Assert-True $freshRefused 'A redirected fresh-install fixture must not invoke canonical host identity preparation.'
         $freshRefusal = Get-Content -Raw -LiteralPath $freshRefusalPath | ConvertFrom-Json
-        Assert-True ($freshRefusal.message -match 'identity_preparation_requires_canonical_layout') 'The redirected identity boundary must fail closed before host execution.'
+        Assert-True ($freshRefusal.message -match 'identity_preparation_requires_canonical_layout') ('The redirected identity boundary must fail closed before host execution. Observed: '+$freshRefusal.message)
         & (Join-Path $bridgeRoot "Install-RevAgentBridge.ps1") `
             -PackageRoot $goodFixture.PackageRoot `
             -TrustedKeysPath $goodFixture.TrustedKeysPath `
@@ -949,6 +973,43 @@ try {
     Assert-Equal $uninstallMissingFields.Count 0 "The uninstaller report (including nested uninstall.*) must have zero missing required schema fields. Missing: $($uninstallMissingFields -join ',')"
 
     # =====================================================================
+    Write-Host 'Test BridgeOwned report guards preserve existing reports and affected roots'
+    # Exercise the real signed-package/owned-inventory/dry-run path without
+    # pretending this non-admin process owns SYSTEM/Administrators ACLs.
+    $oldReader=& (Get-Module RevAgent.BridgeInstall) {Get-Item Function:Get-Acl -ErrorAction SilentlyContinue}
+    $oldReaderBody=if($oldReader){$oldReader.ScriptBlock}else{$null}
+    $cleanupAncestorPaths=@((Split-Path $realRunLayout.InstallRoot -Parent),(Split-Path $realRunLayout.StateRoot -Parent),$realRunLayout.AddinProgramFilesRoot,(Split-Path $realRunLayout.AddinProgramFilesRoot -Parent))
+    $ownedMetadataReader={
+        param([string]$LiteralPath,$ErrorAction)
+        $a=Microsoft.PowerShell.Security\Get-Acl -LiteralPath $LiteralPath -ErrorAction Stop
+        $scoped=$LiteralPath -ieq $realRunAddinLayout.ManifestPath -or $LiteralPath -in $cleanupAncestorPaths
+        foreach($rootPath in @($realRunLayout.InstallRoot,$realRunLayout.StateRoot,$realRunAddinLayout.AddinBinRoot)){if($LiteralPath -ieq $rootPath -or $LiteralPath.StartsWith($rootPath+'\',[StringComparison]::OrdinalIgnoreCase)){$scoped=$true}}
+        if($scoped){$a.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'));return $a}
+        if($oldReaderBody){return & $oldReaderBody @PSBoundParameters};return $a
+    }.GetNewClosure()
+    Set-Item Function:global:Get-Acl -Value $ownedMetadataReader
+    try {
+        $plan=Get-RevAgentBridgeOwnedCleanupPlan -Layout $realRunLayout -RevitVersion 2022 -PackageRoot $goodFixture.PackageRoot -TrustedKeysPath $goodFixture.TrustedKeysPath
+        Assert-True ($plan.items.Count -gt 3) 'Owned plan must include actual signed payload and state entries.'
+        Assert-True (@($plan.items|Where-Object{$_.stateContentNotRead -and $_.sha256}).Count -eq 0) 'State/credential contents must not be hashed into the report.'
+        $preview=& (Join-Path $bridgeRoot 'Uninstall-RevAgentBridge.ps1') -Scope BridgeOwned -PackageRoot $goodFixture.PackageRoot -TrustedKeysPath $goodFixture.TrustedKeysPath @realRunLayoutArgs -ProgramDataRoot (Join-Path $realRunTemp 'absent-legacy-data') -MachineReportPath (Join-Path $realRunTemp 'owned-preview.json') -DryRun
+        Assert-Equal $preview.status 'success' 'Explicit owned dry-run must succeed with verified test metadata.'
+        Assert-Equal $preview.uninstall.scope 'BridgeOwned' 'Report must identify the explicit scope.'
+        Assert-True (-not $preview.uninstall.ownedCleanup.completed -and $preview.uninstall.legacyTrees.Count -eq 0) 'Dry-run must not claim removal or run legacy cleanup.'
+        Assert-True (Test-Path -LiteralPath $realRunLayout.HostExecutablePath) 'Owned dry-run preserves signed payload.'
+    } finally {if($oldReaderBody){Set-Item Function:global:Get-Acl -Value $oldReaderBody}else{& (Get-Module RevAgent.BridgeInstall) {Remove-Item Function:Get-Acl}}}
+    $ownedReport = Join-Path $realRunTemp 'must-preserve-report.json'
+    [IO.File]::WriteAllText($ownedReport,'preserve-existing-report')
+    Assert-ThrowsLike {
+        & (Join-Path $bridgeRoot 'Uninstall-RevAgentBridge.ps1') -Scope BridgeOwned -PackageRoot $goodFixture.PackageRoot -TrustedKeysPath $goodFixture.TrustedKeysPath @realRunLayoutArgs -MachineReportPath $ownedReport -DryRun | Out-Null
+    } 'bridge_owned_report_must_be_fresh' 'Owned cleanup must not overwrite an existing report, even on refusal.'
+    Assert-Equal ([IO.File]::ReadAllText($ownedReport)) 'preserve-existing-report' 'Existing external report must survive.'
+    $insideReport=Join-Path $realRunLayout.StateRoot 'uninstall-proof.json'
+    Assert-ThrowsLike {
+        & (Join-Path $bridgeRoot 'Uninstall-RevAgentBridge.ps1') -Scope BridgeOwned -PackageRoot $goodFixture.PackageRoot -TrustedKeysPath $goodFixture.TrustedKeysPath @realRunLayoutArgs -MachineReportPath $insideReport -DryRun | Out-Null
+    } 'bridge_owned_report_inside_affected_root' 'Owned cleanup report must be outside affected roots.'
+    Assert-True (-not(Test-Path -LiteralPath $insideReport)) 'Rejected report must not create a file in a cleanup target.'
+
     Write-Host "Test bounded Codex config edit preserves everything outside the two managed sections byte-for-byte"
     # =====================================================================
     $codexRoot = New-TestScratchDirectory -Label "codex-config"
