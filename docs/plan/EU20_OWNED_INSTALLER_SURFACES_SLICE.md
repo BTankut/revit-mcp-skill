@@ -1,5 +1,19 @@
 # EU-20 owned installer surfaces and recovery
 
+Native evidence update: candidate `f5499923bad5db3fd4ea0bbe2680e2bea1ad3a9a`
+passed 39 actual elevated checks under Windows PowerShell 5.1 and 39 under
+PowerShell 7.6.5 on the coordinator. The isolated fixtures proved owned
+distribution ACLs, SYSTEM-owned shared-directory and sibling preservation,
+manifest publication, foreign/modified surface refusal, actual BridgeOwned
+dry-run/cleanup, complete empty-ancestor removal, preservation of nonempty
+ancestors, idempotency and legacy/user-state preservation. No machine service,
+live Revit or PETRUCCI action occurred. Public outcome receipts and retained
+private fixtures are under local `artifacts/EU-20/astra-b1/owned-installer-surfaces/`
+(`native-f5499923-Desktop-20260905T200215Z-bd3c25803be54af9a19ecb1698dc327c.json`
+and `native-f5499923-Core-20260905T200220Z-53ac3a3d6381448da15415aa5986a406.json`).
+Earlier pending-native wording below describes preparation before those runs;
+final delivery gates/review are recorded in the PR and local final handoff.
+
 Hedef: preserve shared Revit permissions and remove the owned Bridge footprint safely | Plan satırı: M6/P3-T9, P3-T10, P-INST-1, P-INST-3 and M6 lab runbook R1 | Kabul: native elevated install/cleanup fixtures preserve a SYSTEM-owned shared Addins directory and unrelated add-ins while removing only Bridge-owned files | Kapsam: installer ACL targets, owned distribution ACL producer, explicit Bridge cleanup and focused/native regressions | Forecast: 1-2 active engineering hours excluding CI/review
 
 Base: protected main `80d65e661b96cdf24d546101b98df6b75dc04db7`.
