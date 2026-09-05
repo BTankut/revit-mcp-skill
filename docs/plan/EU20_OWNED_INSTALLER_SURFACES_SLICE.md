@@ -1,5 +1,16 @@
 # EU-20 owned installer surfaces and recovery
 
+Runtime-footprint review correction: `a142aa0432de60263c74442fdc56af990851adeb`
+passed 43 actual elevated native checks in each of PS5.1 and PS7.6.5. The
+fixture now opens/disposes the production RbpJournalStore/writer lease and
+Windows artifact-spool filesystem, then exercises actual owned cleanup of
+their retained clean-stop state. Unknown spool children remain refused.
+Receipts: local `native-a142aa04-Desktop-20260905T205122Z-6751914824af426db3f85fc6f78dc288.json`
+and `native-a142aa04-Core-20260905T205128Z-3e14dcb55d2648cbb896ba9f0b2fa329.json`
+under the same owned-installer-surfaces evidence root. This supersedes the
+earlier 39-check fixture for the reviewer-identified runtime footprint gap;
+the earlier evidence remains valid only for its documented scope.
+
 Native evidence update: candidate `f5499923bad5db3fd4ea0bbe2680e2bea1ad3a9a`
 passed 39 actual elevated checks under Windows PowerShell 5.1 and 39 under
 PowerShell 7.6.5 on the coordinator. The isolated fixtures proved owned
