@@ -47,3 +47,36 @@ recorded separately in the local programme parking list.
 
 No lab installation, live acceptance or milestone closure is represented by
 this source/test correction.
+
+## Implementation and focused evidence
+
+The FIFO rejection test now holds the real fixture child alive across its
+termination request, deterministically exposing the interval before the exit
+event. Two additional cases destroy the actual stdin Writable with `EPIPE`
+and `ECONNRESET`. On the original implementation all three new cases failed
+and Vitest recorded two uncaught stream errors. These are deliberate local
+fault injections, not a claim that the exact CI scheduling was replayed.
+
+Fatal control failures now close admission before rejecting pending requests
+and requesting termination. The stdin error event has an owner throughout
+stdio drain; write callback errors and fatal protocol/time-budget failures
+use the same terminal transition. An expected component control-error
+response still leaves the channel usable. `stop()` continues to require an
+observed exit and bounded pipe drain; it no longer sends shutdown after a
+terminal control failure or reports a shutdown acknowledgement for that path.
+
+Focused validation on Node 24.14.1: all 31 process-harness cases passed,
+including strict FIFO rejection, all affected pending promises, absence of
+post-failure writes, real process disappearance, late stream-error ownership,
+and the existing checked stop/drain cases. Protocol build, conformance
+typecheck, changed-file ESLint and `git diff --check` passed. The focused
+configuration intentionally selects only this process test file and does not
+prepare the production Gateway/Bridge stack.
+
+Raw red/green evidence is retained outside the checkout under
+`.orchestration/autopilot-v2/artifacts/EU-20/astra-b1/conformance-pipe-lifecycle`.
+Required freshness, `test-all.ps1`, and `test-ci.ps1` results are recorded there
+against the final committed head; their terminal receipts, not this pre-gate
+record, establish delivery status. Independent review and protected checks
+remain required. Active engineering time was not independently metered, so
+no actual-hours or forecast variance claim is made. Park List remains empty.

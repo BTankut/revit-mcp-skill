@@ -569,6 +569,9 @@ export class StrictJsonlProcess {
     this.process = { pid, startedAt, readyAt, stoppedAt: null, exitCode: null };
     this.#exit = new Promise((resolve) => { this.#exitResolve = resolve; });
     this.#stdioClosed = stdioCompletion;
+    // Writable emits an error event even when write() has an error callback.
+    // Keep ownership through stdio drain, including errors after fatal teardown.
+    child.stdin.on("error", (error: Error) => { this.#failControl(error); });
     child.once("exit", (code, signal) => {
       const at = new Date().toISOString();
       const normalized = code ?? (signal === null ? 1 : 128);
@@ -620,7 +623,8 @@ export class StrictJsonlProcess {
       }, options.command.readiness.timeoutMs);
       const fail = (failure: Error): void => {
         if (settled) {
-          child.kill("SIGTERM");
+          if (active.instance !== undefined) active.instance.#failControl(failure);
+          else child.kill("SIGTERM");
           return;
         }
         settled = true;
@@ -741,9 +745,17 @@ export class StrictJsonlProcess {
       }
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
-      this.#rejectAllPending(failure);
-      this.child.kill("SIGTERM");
+      this.#failControl(failure);
     }
+  }
+
+  #failControl(error: Error): void {
+    if (this.#closed) return;
+    // Terminal control state precedes rejection callbacks and asynchronous exit.
+    // stop() must still observe exit/drain, but cannot enqueue shutdown now.
+    this.#closed = true;
+    this.#rejectAllPending(error);
+    this.child.kill("SIGTERM");
   }
 
   #rejectAllPending(error: Error): void {
@@ -779,17 +791,17 @@ export class StrictJsonlProcess {
       const timer = setTimeout(() => {
         if (!this.#pending.has(id)) return;
         const failure = new Error(`${this.componentId} control ${action} timed out`);
-        this.#rejectAllPending(failure);
-        this.child.kill("SIGTERM");
+        this.#failControl(failure);
       }, timeoutMs);
       this.#pending.set(id, { id, resolve, reject, timer });
       this.#responseOrder.push(id);
-      this.child.stdin.write(bytes, (error) => {
-        if (error !== undefined && error !== null && this.#pending.has(id)) {
-          this.#rejectAllPending(error);
-          this.child.kill("SIGTERM");
-        }
-      });
+      try {
+        this.child.stdin.write(bytes, (error) => {
+          if (error !== undefined && error !== null) this.#failControl(error);
+        });
+      } catch (error) {
+        this.#failControl(error instanceof Error ? error : new Error(String(error)));
+      }
     });
     return { id, response };
   }
