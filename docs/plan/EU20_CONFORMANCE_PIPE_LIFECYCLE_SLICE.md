@@ -80,3 +80,22 @@ against the final committed head; their terminal receipts, not this pre-gate
 record, establish delivery status. Independent review and protected checks
 remain required. Active engineering time was not independently metered, so
 no actual-hours or forecast variance claim is made. Park List remains empty.
+
+## Inventory follow-up
+
+Protected CI run `34043105264`, Gateway job `101513271433`, executed all five
+shards successfully at `5f245c8e5e93826116d25dd73422cf60a5485ef2`: 73 files,
+626 tests (624 passed, two expected skips), without the uncaught pipe errors.
+The final wrapper correctly failed because its frozen expectation still
+counted 623 tests. This slice added three regression cases: the deterministic
+FIFO teardown case and the two parameterized stdin-error cases.
+
+The authorized ownership extension is limited to the `expectedTests`
+constant in `packages/rbp-conformance/scripts/run-tests.mjs`, updated from
+623 to 626. Exact file, shard, test-count and failure checks remain intact;
+neither the harness nor test behavior changes in this follow-up.
+
+The five-shard execution and successful local delivery gates remain evidence
+for the original `5f245c8e` head. The inventory successor receives syntax,
+exact-diff and recorded-total validation only; its final protected CI must
+execute separately. No earlier run is relabeled as successor execution.

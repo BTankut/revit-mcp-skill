@@ -24,7 +24,7 @@ const shardCount = 5;
 // The cardinality gate is deliberately coupled: adding a test file has to be a
 // visible edit here rather than something a shard silently absorbs.
 const expectedFiles = 73;
-const expectedTests = 623;
+const expectedTests = 626;
 const fullSuite = forwardedArguments.length === 0;
 const invocations = forwardedArguments.length > 0
   ? [["run", ...forwardedArguments]]
