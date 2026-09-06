@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
@@ -678,6 +678,79 @@ describe("strict JSONL process control", () => {
       expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ message: expect.stringMatching(/out-of-order/u) }) }),
     ]);
     await expect(child.stop()).resolves.toMatchObject({ exitCode: expect.any(Number) });
+  });
+
+  it("does not write shutdown after fatal FIFO rejection before the child exit event", async () => {
+    const child = await StrictJsonlProcess.start({
+      componentId: "addin_loopback_fixture",
+      command: command("out-of-order"),
+      absoluteWorkingDirectory: here,
+      expectedReadinessFields: { component: "fixture-test" },
+      requiredActions: ["stall", "release", "shutdown"],
+    });
+    const handle = (child as unknown as { child: ChildProcessWithoutNullStreams }).child;
+    // Hold the real child alive across fatal rejection, making the pre-exit
+    // interval deterministic instead of relying on the OS teardown schedule.
+    const kill = vi.spyOn(handle, "kill").mockReturnValue(true);
+    const write = vi.spyOn(handle.stdin, "write");
+    try {
+      const stalled = child.startConcurrentRequest("stall");
+      const released = child.startConcurrentRequest("release");
+      const results = await Promise.allSettled([stalled.response, released.response]);
+      expect(results).toEqual([
+        expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ message: expect.stringMatching(/out-of-order/u) }) }),
+        expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ message: expect.stringMatching(/out-of-order/u) }) }),
+      ]);
+      expect(child.process.exitCode).toBeNull();
+      expect(kill).toHaveBeenCalledWith("SIGTERM");
+      const writesAtFailure = write.mock.calls.length;
+      await expect(child.request("ping")).rejects.toThrow(/closed/u);
+      kill.mockRestore();
+      const stopped = await child.stop(1_000);
+      expect(stopped).toMatchObject({ exitCode: expect.any(Number), telemetry: { acknowledgement: "not_requested" } });
+      expect(child.process.stoppedAt).not.toBeNull();
+      expect(write.mock.calls).toHaveLength(writesAtFailure);
+      expect(() => process.kill(child.pid, 0)).toThrow();
+    } finally {
+      kill.mockRestore();
+      write.mockRestore();
+      await child.terminateForConformance(2_000);
+    }
+  });
+
+  it.each(["EPIPE", "ECONNRESET"])("owns stdin %s and rejects all pending controls", async (code) => {
+    const child = await StrictJsonlProcess.start({
+      componentId: "addin_loopback_fixture",
+      command: command(),
+      absoluteWorkingDirectory: here,
+      expectedReadinessFields: { component: "fixture-test" },
+      requiredActions: ["stall", "shutdown"],
+    });
+    const handle = (child as unknown as { child: ChildProcessWithoutNullStreams }).child;
+    const write = vi.spyOn(handle.stdin, "write");
+    try {
+      const first = child.startConcurrentRequest("stall", {}, 2_000);
+      const second = child.startConcurrentRequest("stall", {}, 2_000);
+      const failure = Object.assign(new Error(`owned stdin ${code}`), { code });
+      // Exercise the real Writable error-event path, including its asynchronous
+      // delivery; a write callback alone does not own this event.
+      handle.stdin.destroy(failure);
+      const results = await Promise.allSettled([first.response, second.response]);
+      expect(results).toEqual([
+        { status: "rejected", reason: failure },
+        { status: "rejected", reason: failure },
+      ]);
+      const writesAtFailure = write.mock.calls.length;
+      await expect(child.request("stall")).rejects.toThrow(/closed/u);
+      await expect(child.stop(2_000)).resolves.toMatchObject({ exitCode: expect.any(Number), telemetry: { acknowledgement: "not_requested" } });
+      expect(child.process.stoppedAt).not.toBeNull();
+      expect(write.mock.calls).toHaveLength(writesAtFailure);
+      expect(() => process.kill(child.pid, 0)).toThrow();
+      expect(() => handle.stdin.emit("error", failure)).not.toThrow();
+    } finally {
+      write.mockRestore();
+      await child.terminateForConformance(2_000);
+    }
   });
 
   it("fails closed when readiness controls are absent or startup exits with stderr", async () => {
