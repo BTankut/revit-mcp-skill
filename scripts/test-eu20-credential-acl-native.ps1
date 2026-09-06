@@ -82,6 +82,16 @@ try{
     $stage='foreign_ace_refusal'
     foreach($deny in @($false,$true)){
         $foreign=Join-Path $root ('foreign-'+$deny);[void][IO.Directory]::CreateDirectory($foreign);$a=Get-Acl -LiteralPath $foreign
+        # Materialize a protected native baseline before injection. A newly
+        # inherited DACL can acquire DaclAutoInherited during its first restore.
+        # Retain this fixture's Administrators owner so its Deny Read ACL can
+        # still be inspected; the genuine SYSTEM-owned parent is tested above.
+        $a.SetAccessRuleProtection($true,$false)
+        foreach($sid in @('S-1-5-18','S-1-5-32-544')){$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','ContainerInherit,ObjectInherit','None','Allow'))}
+        $directory=[IO.DirectoryInfo]::new($foreign)
+        if($PSVersionTable.PSEdition -eq 'Desktop'){$directory.SetAccessControl($a)}else{[IO.FileSystemAclExtensions]::SetAccessControl($directory,$a)}
+        $a=Get-Acl -LiteralPath $foreign
+        Check ($a.AreAccessRulesProtected -and $a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ceq 'S-1-5-32-544' -and @($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])).Count -eq 2) "native canonical fixture baseline $deny"
         $originalSddl=$a.Sddl
         $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'Read',$(if($deny){'Deny'}else{'Allow'})))
         Set-Acl -LiteralPath $foreign -AclObject $a;$before=(Get-Acl -LiteralPath $foreign).Sddl;$refused=$false
