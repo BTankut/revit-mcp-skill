@@ -744,24 +744,108 @@ function Set-RevAgentBridgeDistributionAcl {
         [scriptblock]$IcaclsInvoker
     )
 
+    [void](Assert-RevAgentBridgeNoReparsePoint -Path $Path -GuardRoot (Split-Path -Parent $Path))
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $Path) -Directory $item.PSIsContainer -Preflight
     if ($null -eq $IcaclsInvoker) {
         $IcaclsInvoker = {
             param([string[]]$Arguments)
-            $output = & icacls.exe @Arguments 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                throw "icacls.exe failed (exit $LASTEXITCODE) for arguments [$($Arguments -join ' ')]: $output"
-            }
+            $saved = $ErrorActionPreference
+            try { $ErrorActionPreference = 'Continue'; $output = & "$env:SystemRoot\System32\icacls.exe" @Arguments 2>&1; $exit = $LASTEXITCODE }
+            finally { $ErrorActionPreference = $saved }
+            if ($exit -ne 0) { throw "bridge_distribution_icacls_failed: exit=$exit operation=$($Arguments[1])" }
             return $output
         }
     }
-
+    $inherit = if ($item.PSIsContainer) { '(OI)(CI)' } else { '' }
+    [void](& $IcaclsInvoker @($Path, '/grant:r', "*S-1-5-18:${inherit}F", "*S-1-5-32-544:${inherit}F", "*S-1-5-32-545:${inherit}RX", '/Q'))
     [void](& $IcaclsInvoker @($Path, '/inheritance:r', '/Q'))
-    [void](& $IcaclsInvoker @(
-            $Path,
-            '/grant:r', 'SYSTEM:(OI)(CI)F',
-            '/grant:r', 'BUILTIN\Administrators:(OI)(CI)F',
-            '/grant:r', 'BUILTIN\Users:(OI)(CI)RX',
-            '/Q'))
+    Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $Path) -Directory $item.PSIsContainer
+}
+
+function Assert-RevAgentBridgeDistributionSecurity {
+    param([Parameter(Mandatory=$true)][Security.AccessControl.FileSystemSecurity]$Security,
+        [bool]$Directory, [switch]$Preflight)
+    $sidType = [Security.Principal.SecurityIdentifier]
+    if ($Security.GetOwner($sidType).Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'bridge_distribution_untrusted_owner' }
+    $rules = @($Security.GetAccessRules($true,$true,$sidType))
+    $rx = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize
+    foreach ($rule in $rules) {
+        $sid = $rule.IdentityReference.Value
+        if ($rule.AccessControlType -ne 'Allow' -or (-not $rule.IsInherited -and
+            ($sid -notin @('S-1-5-18','S-1-5-32-544','S-1-5-32-545') -or
+            ($sid -eq 'S-1-5-32-545' -and ($rule.FileSystemRights -band (-bnot $rx)) -ne 0)))) {
+            throw 'bridge_distribution_unexpected_ace'
+        }
+    }
+    if ($Preflight) { return }
+    $flags = if ($Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' } else { [Security.AccessControl.InheritanceFlags]::None }
+    if (-not $Security.AreAccessRulesProtected -or $rules.Count -ne 3) { throw 'bridge_distribution_acl_verification_failed' }
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544','S-1-5-32-545')) {
+        $r = @($rules | Where-Object { $_.IdentityReference.Value -ceq $sid })
+        $rights = if ($sid -eq 'S-1-5-32-545') { $rx } else { [Security.AccessControl.FileSystemRights]::FullControl }
+        if ($r.Count -ne 1 -or $r[0].IsInherited -or $r[0].FileSystemRights -ne $rights -or $r[0].InheritanceFlags -ne $flags -or $r[0].PropagationFlags -ne 'None') { throw 'bridge_distribution_acl_verification_failed' }
+    }
+}
+
+function Get-RevAgentBridgeManagedManifestAssembly {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    if ((Get-Item -LiteralPath $Path).Length -gt 65536) { throw 'bridge_manifest_not_owned' }
+    $settings = [Xml.XmlReaderSettings]::new(); $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null; $settings.MaxCharactersInDocument = 65536
+    $reader = [Xml.XmlReader]::Create($Path,$settings)
+    try { $document = [Xml.XmlDocument]::new(); $document.XmlResolver = $null; $document.Load($reader) }
+    catch { throw 'bridge_manifest_not_owned' }
+    finally { $reader.Dispose() }
+    $nodes = $document.SelectNodes('/RevitAddIns/AddIn')
+    if ($nodes.Count -ne 1 -or $nodes[0].GetAttribute('Type') -cne 'Application') { throw 'bridge_manifest_not_owned' }
+    $required = @{ Name='revAgent'; FullClassName='RevAgentPlugin.Core.Application'; ClientId='090A4C8C-61DC-426D-87DF-E4BAE0F80EC1'; VendorId='DPE' }
+    foreach ($key in $required.Keys) { $n=$nodes[0].SelectNodes($key); if ($n.Count -ne 1 -or $n[0].InnerText -cne $required[$key]) { throw 'bridge_manifest_not_owned' } }
+    $assembly = $nodes[0].SelectNodes('Assembly')
+    if ($assembly.Count -ne 1 -or -not [IO.Path]::IsPathRooted($assembly[0].InnerText)) { throw 'bridge_manifest_not_owned' }
+    return [IO.Path]::GetFullPath($assembly[0].InnerText)
+}
+
+function Write-RevAgentBridgeOwnedManifest {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)][string]$AssemblyPath,
+        [Parameter(Mandatory=$true)][string]$GuardRoot, [scriptblock]$IcaclsInvoker)
+    $Bytes = (New-RevAgentBridgeAddinManifestContract -AssemblyPath $AssemblyPath).bytes
+    $full = Assert-RevAgentBridgeNoReparsePoint -Path $Path -GuardRoot $GuardRoot
+    if ([IO.Path]::GetFileName($full) -cne 'revAgent.addin') { throw 'bridge_manifest_name_invalid' }
+    $parent = Split-Path -Parent $full
+    $parentAcl = (Get-Acl -LiteralPath $parent).Sddl
+    if (Test-Path -LiteralPath $full) {
+        Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $full) -Directory $false -Preflight
+        [void](Get-RevAgentBridgeManagedManifestAssembly -Path $full)
+    }
+    $security = [Security.AccessControl.FileSecurity]::new()
+    # Use the creator token's normal owner; the elevated installer creates
+    # an Administrators-owned file. Final policy verification still requires
+    # SYSTEM/Administrators ownership, without an ownership-transfer step.
+    $security.SetAccessRuleProtection($true,$false)
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544','S-1-5-32-545')) {
+        $rights = if ($sid -eq 'S-1-5-32-545') { [Security.AccessControl.FileSystemRights]::ReadAndExecute } else { [Security.AccessControl.FileSystemRights]::FullControl }
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),$rights,'Allow'))
+    }
+    $temporary = Join-Path $parent ('.revAgent.addin.'+[guid]::NewGuid().ToString('N')+'.tmp')
+    $stream=$null;$created=$false
+    try {
+        $rights = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::ReadPermissions
+        if ($PSVersionTable.PSEdition -eq 'Desktop') { $stream=[IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,$rights,[IO.FileShare]::None,4096,[IO.FileOptions]::None,$security) }
+        else { $stream=[IO.FileSystemAclExtensions]::Create([IO.FileInfo]::new($temporary),[IO.FileMode]::CreateNew,$rights,[IO.FileShare]::None,4096,[IO.FileOptions]::None,$security) }
+        $created=$true;$stream.Write($Bytes,0,$Bytes.Length);$stream.Flush($true);$stream.Dispose();$stream=$null
+        [void](Assert-RevAgentBridgeNoReparsePoint -Path $full -GuardRoot $GuardRoot)
+        if (Test-Path -LiteralPath $full) {
+            Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $full) -Directory $false -Preflight
+            [void](Get-RevAgentBridgeManagedManifestAssembly -Path $full)
+            [IO.File]::Replace($temporary,$full,[NullString]::Value)
+        } else { [IO.File]::Move($temporary,$full) }
+        $created=$false
+        Set-RevAgentBridgeDistributionAcl -Path $full -IcaclsInvoker $IcaclsInvoker
+        if ((Get-Acl -LiteralPath $parent).Sddl -cne $parentAcl) { throw 'bridge_shared_manifest_directory_acl_changed' }
+        return $full
+    } finally { if ($stream) { $stream.Dispose() }; if ($created -and (Test-Path -LiteralPath $temporary)) { [IO.File]::Delete($temporary) } }
 }
 
 # ---------------------------------------------------------------------------
@@ -1052,6 +1136,156 @@ function Get-RevAgentBridgeLegacyRemovalTargets {
     )
 }
 
+# BridgeOwned is separate from the frozen legacy-cutover wipe list. Its
+# complete inventory is checked before removal; unknown files are never
+# converted into a recursive directory delete.
+function Get-RevAgentBridgeOwnedEntries {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $full=[IO.Path]::GetFullPath($Root).TrimEnd('\')
+    [void](Assert-RevAgentBridgeNoReparsePoint -Path $full -GuardRoot ([IO.Path]::GetPathRoot($full)))
+    if(-not(Test-Path -LiteralPath $full)){return @()}
+    $stack=[Collections.Generic.Stack[string]]::new();$stack.Push($full);$rows=[Collections.Generic.List[object]]::new()
+    while($stack.Count){
+        $path=$stack.Pop();$item=Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'bridge_owned_reparse_refused'}
+        if($rows.Count -ge 10000){throw 'bridge_owned_inventory_limit'}
+        $relative=$item.FullName.Substring($full.Length).TrimStart('\')
+        $rows.Add([pscustomobject]@{Path=$item.FullName;Relative=$relative;Directory=[bool]$item.PSIsContainer})
+        if($item.PSIsContainer){foreach($child in @(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop)){$stack.Push($child.FullName)}}
+    }
+    return $rows.ToArray()
+}
+
+function Test-RevAgentBridgeOwnedStatePath {
+    param([string]$Relative,[bool]$Directory)
+    $path=$Relative.Replace('\','/')
+    # Exact paths from BridgeInstallLayout; atomic residue suffixes from
+    # AtomicCredentialFileWriter. Contents of credentials are never read.
+    if($Directory){return $path -eq '' -or $path -in @('credentials','reports','logs','logs/host','logs/worker','bundle-extract','artifact-spool') -or $path -match '^bundle-extract/(revagent-bridge|revagent-bridge-host)(/[A-Za-z0-9_+.-]{1,128})?$'}
+    # RbpJournalWriterLease retains its lock file after Dispose; the carrier
+    # spool producer similarly retains its empty startup root. Carrier children
+    # remain unknown here and must not be swept as arbitrary state content.
+    if($path -in @('bridge-config.json','journal.db','journal.db-wal','journal.db-shm','journal.db-journal','journal.db.writer.lock')){return $true}
+    if($path -match '^\.bridge-config\.json\.[a-f0-9]{32}\.tmp$' -or $path -match '^credentials/\.enrollment\.[a-f0-9]{32}\.tmp$'){return $true}
+    if($path -match '^credentials/(machine-identity\.dpapi|machine-fingerprint\.json|device-credential\.dpapi|auth-diagnostic\.json|enrollment\.lock|enrollment\.json)(\.revagent-write\.(tmp|bak|intent)|\.revagent-restore\.tmp)?$'){return $true}
+    if($path -match '^reports/(install|uninstall)-(latest|[0-9]{8}T[0-9]{6}Z)\.json$'){return $true}
+    if($path -match '^reports/\.(install|uninstall)-(latest|[0-9]{8}T[0-9]{6}Z)\.json\.[a-f0-9]{32}\.tmp$'){return $true}
+    # RollingJsonBridgeLog.BuildPath: prefix, yyyyMMdd, nonnegative sequence.
+    if($path -match '^logs/(host/revagent-bridge-host|worker/worker)-([0-9]{8})-([0-9]{4,10})\.jsonl$'){
+        $date=[datetime]::MinValue;$sequence=0
+        return [datetime]::TryParseExact($Matches[2],'yyyyMMdd',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$date) -and [int]::TryParse($Matches[3],[ref]$sequence) -and $sequence -ge 0
+    }
+    # The host assigns this dedicated .NET bundle extraction root for the
+    # two published executables (HostCommandDispatcher/WorkerSupervisor).
+    # Only native library leaves in that runtime-owned shape are admitted.
+    return $path -match '^bundle-extract/(revagent-bridge|revagent-bridge-host)/[A-Za-z0-9_+.-]{1,128}/[A-Za-z0-9_.-]+\.dll$'
+}
+
+function Get-RevAgentBridgeOwnedCleanupPlan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Layout,[Parameter(Mandatory=$true)][string]$RevitVersion,
+        [Parameter(Mandatory=$true)][string]$PackageRoot,[Parameter(Mandatory=$true)][string]$TrustedKeysPath,
+        [string[]]$Anchors=@())
+    Import-Module (Join-Path $PSScriptRoot '..\..\lib\RevAgent.DistributionIntegrity.psm1') -Force
+    $addin=Get-RevAgentBridgeAddinLayout -Layout $Layout -RevitVersion $RevitVersion
+    $roots=@($Layout.InstallRoot,$Layout.StateRoot,$addin.AddinBinRoot)
+    if(@($roots|Sort-Object -Unique).Count -ne 3){throw 'bridge_owned_roots_overlap_protected_surface'}
+    foreach($root in $roots){
+        if($root.TrimEnd('\') -eq [IO.Path]::GetPathRoot($root).TrimEnd('\')){throw 'bridge_owned_root_is_drive'}
+        foreach($other in @($roots|Where-Object{$_ -ine $root})+@($Layout.RevitAddinsRoot)+$Anchors){
+            if($root -ieq $other -or $root.StartsWith($other.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or $other.StartsWith($root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'bridge_owned_roots_overlap_protected_surface'}
+        }
+    }
+    $package=[IO.Path]::GetFullPath($PackageRoot).TrimEnd('\')
+    [void](Get-RevAgentBridgeOwnedEntries -Root $package)
+    $raw=Get-Content -LiteralPath $TrustedKeysPath -Raw|ConvertFrom-Json;$keys=@{}
+    foreach($property in $raw.PSObject.Properties){$key=$property.Value;$keys[$property.Name]=@{publicKeyXml=$key.publicKeyXml;publicKeyFingerprint=$key.publicKeyFingerprint;algorithm=$key.algorithm}}
+    $content=$null;$verified=Test-RevitMcpDetachedJsonSignatureFile -ContentPath (Join-Path $package 'bridge-release.json') -SignaturePath (Join-Path $package 'bridge-release.json.sig') -TrustedKeys $keys -AllowedSignedObjects @('release-manifest') -VerifiedContent ([ref]$content)
+    if(-not $verified.success){throw 'bridge_owned_package_signature_failed'}
+    $componentPaths=@($content.host.relativePath,$content.worker.relativeDirectory,$content.addin.relativeDirectory)
+    foreach($relative in $componentPaths){
+        if([IO.Path]::IsPathRooted($relative)){throw 'bridge_owned_package_path_invalid'}
+        $path=[IO.Path]::GetFullPath((Join-Path $package $relative));if(-not $path.StartsWith($package+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'bridge_owned_package_path_invalid'}
+    }
+    $hostSource=Join-Path $package $content.host.relativePath;$workerSource=Join-Path $package $content.worker.relativeDirectory;$addinSource=Join-Path $package $content.addin.relativeDirectory
+    if((Get-FileHash -LiteralPath $hostSource).Hash -ine $content.host.sha256 -or (Get-RevAgentBridgeDirectoryTreeSha256 -Path $workerSource) -ine $content.worker.sha256 -or (Get-RevAgentBridgeDirectoryTreeSha256 -Path $addinSource) -ine $content.addin.sha256){throw 'bridge_owned_package_tree_failed'}
+    $expected=@{};$expected[$Layout.HostExecutablePath]=(Get-FileHash -LiteralPath $hostSource).Hash
+    foreach($component in @(@{Source=$workerSource;Destination=$Layout.CurrentWorkerDirectory},@{Source=$addinSource;Destination=$addin.AddinBinRoot})){
+        foreach($entry in @(Get-RevAgentBridgeOwnedEntries -Root $component.Source|Where-Object{-not $_.Directory})){$expected[(Join-Path $component.Destination $entry.Relative)]=(Get-FileHash -LiteralPath $entry.Path).Hash}
+    }
+    $rows=[Collections.Generic.List[object]]::new()
+    foreach($root in $roots){foreach($entry in @(Get-RevAgentBridgeOwnedEntries -Root $root)){
+        $acl=Get-Acl -LiteralPath $entry.Path -ErrorAction Stop
+        Assert-RevAgentBridgeDistributionSecurity -Security $acl -Directory $entry.Directory -Preflight
+        $state=$root -ieq $Layout.StateRoot
+        if($state -and -not(Test-RevAgentBridgeOwnedStatePath -Relative $entry.Relative -Directory $entry.Directory)){throw 'bridge_owned_unknown_state_path'}
+        $hash=$null
+        if(-not $entry.Directory -and -not $state){if(-not $expected.ContainsKey($entry.Path)){throw 'bridge_owned_unknown_payload_file'};$hash=(Get-FileHash -LiteralPath $entry.Path).Hash;if($hash -cne $expected[$entry.Path]){throw 'bridge_owned_modified_payload_file'}}
+        if($entry.Directory -and -not $state -and $entry.Path -ine $root -and -not @($expected.Keys|Where-Object{$_.StartsWith($entry.Path+'\',[StringComparison]::OrdinalIgnoreCase)}).Count){throw 'bridge_owned_unknown_payload_directory'}
+        $item=Get-Item -LiteralPath $entry.Path -Force
+        $rows.Add([pscustomobject]@{path=$entry.Path;kind=$(if($entry.Directory){'directory'}else{'file'});sha256=$hash;bytes=$(if($entry.Directory){$null}else{$item.Length});lastWriteUtc=$item.LastWriteTimeUtc.ToString('o');sddl=$acl.Sddl;stateContentNotRead=$state;disposition='remove'})
+    }}
+    $manifestDisposition='absent'
+    [void](Assert-RevAgentBridgeNoReparsePoint -Path $addin.ManifestPath -GuardRoot ([IO.Path]::GetPathRoot($addin.ManifestPath)))
+    if(Test-Path -LiteralPath $addin.ManifestPath){
+        $assembly=Get-RevAgentBridgeManagedManifestAssembly -Path $addin.ManifestPath
+        if($assembly -ine $addin.AssemblyPath){$manifestDisposition='preserved_legacy_revagent_manifest'}else{
+            Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $addin.ManifestPath) -Directory $false -Preflight
+            $contract=New-RevAgentBridgeAddinManifestContract -AssemblyPath $addin.AssemblyPath;$hash=(Get-FileHash -LiteralPath $addin.ManifestPath).Hash
+            if($hash -cne $contract.sha256){throw 'bridge_owned_modified_manifest'}
+            $item=Get-Item -LiteralPath $addin.ManifestPath
+            $rows.Add([pscustomobject]@{path=$addin.ManifestPath;kind='file';sha256=$hash;bytes=$item.Length;lastWriteUtc=$item.LastWriteTimeUtc.ToString('o');sddl=(Get-Acl -LiteralPath $addin.ManifestPath).Sddl;stateContentNotRead=$false;disposition='remove'})
+            $manifestDisposition='remove_owned_manifest'
+        }
+    }
+    # Only canonical, app-named empty ancestors may be pruned; never a
+    # redirected caller's arbitrary parent or the shared Autodesk directory.
+    $prune=@()
+    foreach($root in @($Layout.InstallRoot,$Layout.StateRoot)){$parent=Split-Path $root -Parent;if([IO.Path]::GetFileName($parent) -ceq 'revAgent'){$prune+=$parent}}
+    if([IO.Path]::GetFileName($Layout.AddinProgramFilesRoot) -ceq 'Addin' -and [IO.Path]::GetFileName((Split-Path $Layout.AddinProgramFilesRoot -Parent)) -ceq 'revAgent'){$prune+=@($Layout.AddinProgramFilesRoot,(Split-Path $Layout.AddinProgramFilesRoot -Parent))}
+    $prunePlan=@()
+    foreach($path in @($prune|Sort-Object -Unique)){
+        [void](Assert-RevAgentBridgeNoReparsePoint -Path $path -GuardRoot ([IO.Path]::GetPathRoot($path)))
+        if(Test-Path -LiteralPath $path){$item=Get-Item -LiteralPath $path -Force;$acl=Get-Acl -LiteralPath $path;Assert-RevAgentBridgeDistributionSecurity -Security $acl -Directory $true -Preflight;$prunePlan+=[pscustomobject]@{path=$path;sddl=$acl.Sddl;creationUtc=$item.CreationTimeUtc.ToString('o')}}
+    }
+    return [pscustomobject]@{roots=$roots;items=$rows.ToArray();manifestDisposition=$manifestDisposition;pruneEmpty=$prunePlan;sharedDirectory=$addin.ManifestDirectory;sharedDirectorySddl=$(if(Test-Path -LiteralPath $addin.ManifestDirectory){(Get-Acl -LiteralPath $addin.ManifestDirectory).Sddl}else{$null})}
+}
+
+function Invoke-RevAgentBridgeOwnedCleanupPlan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Plan,[Parameter(Mandatory=$true)][bool]$DryRun,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][Collections.Generic.List[object]]$Steps)
+    foreach($item in $Plan.items){
+        [void](Assert-RevAgentBridgeNoReparsePoint -Path $item.path -GuardRoot ([IO.Path]::GetPathRoot($item.path)))
+        $current=Get-Item -LiteralPath $item.path -Force -ErrorAction Stop
+        if((Get-Acl -LiteralPath $item.path).Sddl -cne $item.sddl -or ($item.kind -eq 'file' -and ($current.Length -ne $item.bytes -or $current.LastWriteTimeUtc.ToString('o') -cne $item.lastWriteUtc -or ($item.sha256 -and (Get-FileHash -LiteralPath $item.path).Hash -cne $item.sha256)))){throw 'bridge_owned_plan_changed'}
+    }
+    $ordered=@($Plan.items|Sort-Object @{Expression={if($_.kind -eq 'file'){0}else{1}}},@{Expression={$_.path.Length};Descending=$true})
+    foreach($item in $ordered){
+        [void](Invoke-RevAgentBridgeGuardedMutation -Target $item.path -MutationAction 'remove_bridge_owned_item' -DryRun $DryRun -Steps $Steps -Apply {
+            [void](Assert-RevAgentBridgeNoReparsePoint -Path $item.path -GuardRoot ([IO.Path]::GetPathRoot($item.path)))
+            if((Get-Acl -LiteralPath $item.path).Sddl -cne $item.sddl){throw 'bridge_owned_acl_changed'}
+            if($item.kind -eq 'file'){
+                $current=Get-Item -LiteralPath $item.path -Force
+                if($current.Length -ne $item.bytes -or $current.LastWriteTimeUtc.ToString('o') -cne $item.lastWriteUtc -or ($item.sha256 -and (Get-FileHash -LiteralPath $item.path).Hash -cne $item.sha256)){throw 'bridge_owned_file_changed'}
+                [IO.File]::Delete($item.path)
+            }else{if(@(Get-ChildItem -LiteralPath $item.path -Force -ErrorAction Stop).Count){throw 'bridge_owned_directory_not_empty'};[IO.Directory]::Delete($item.path,$false)}
+            if(Test-Path -LiteralPath $item.path){throw 'bridge_owned_removal_unverified'}
+            return 'removed'
+        }.GetNewClosure())
+    }
+    foreach($ancestor in @($Plan.pruneEmpty|Sort-Object @{Expression={$_.path.Length};Descending=$true})){
+        $path=$ancestor.path
+        if(Test-Path -LiteralPath $path){
+            [void](Assert-RevAgentBridgeNoReparsePoint -Path $path -GuardRoot ([IO.Path]::GetPathRoot($path)))
+            if((Get-Acl -LiteralPath $path).Sddl -cne $ancestor.sddl -or (Get-Item -LiteralPath $path).CreationTimeUtc.ToString('o') -cne $ancestor.creationUtc){throw 'bridge_owned_ancestor_changed'}
+            if(@(Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop).Count -eq 0){[void](Invoke-RevAgentBridgeGuardedMutation -Target $path -MutationAction 'remove_empty_bridge_ancestor' -DryRun $DryRun -Steps $Steps -Apply {[IO.Directory]::Delete($path,$false);return 'removed'}.GetNewClosure())}
+        }
+    }
+    if($null -ne $Plan.sharedDirectorySddl -and (Get-Acl -LiteralPath $Plan.sharedDirectory).Sddl -cne $Plan.sharedDirectorySddl){throw 'bridge_owned_shared_directory_changed'}
+    if(-not $DryRun){foreach($root in $Plan.roots){if(Test-Path -LiteralPath $root){throw 'bridge_owned_cleanup_incomplete'}}}
+}
+
 # ---------------------------------------------------------------------------
 # Bounded Codex-config edit: structural removal of the exact two managed
 # legacy local MCP sections, nothing else. Delegates the actual TOML-section
@@ -1228,6 +1462,7 @@ Export-ModuleMember -Function `
     New-RevAgentBridgeGuardedDirectory, `
     Write-RevAgentBridgeGuardedAtomicBytes, `
     Write-RevAgentBridgeCredentialArtifact, `
+    Write-RevAgentBridgeOwnedManifest, `
     Get-RevAgentBridgeConfigurationPlan, `
     Write-RevAgentBridgeConfigurationPlan, `
     New-RevAgentBridgeAddinManifestContract, `
@@ -1236,6 +1471,9 @@ Export-ModuleMember -Function `
     New-RevAgentBridgeEnrollmentArtifactBytes, `
     Set-RevAgentBridgeSystemOnlyAcl, `
     Set-RevAgentBridgeDistributionAcl, `
+    Get-RevAgentBridgeOwnedEntries, `
+    Get-RevAgentBridgeOwnedCleanupPlan, `
+    Invoke-RevAgentBridgeOwnedCleanupPlan, `
     Get-RevAgentBridgeRollbackAnchors, `
     Get-RevAgentBridgeKeepList, `
     Get-RevAgentBridgeManagedScheduledTaskNames, `

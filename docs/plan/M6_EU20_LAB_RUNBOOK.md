@@ -231,6 +231,7 @@ content, same hash).
 
 ```powershell
 $UninstallDryRun = & "installer\bridge\Uninstall-RevAgentBridge.ps1" `
+  -Scope LegacyCutover `
   -CodexConfigPath "<path to the machine's Codex config.toml>" `
   -MachineReportPath "C:\Temp\eu20-uninstall-dryrun-report.json" `
   -DryRun
@@ -353,23 +354,39 @@ on where the failure occurred.
    is recorded `failed`; everything after that never ran (P-INST-1 disjoint
    roots mean nothing here can have touched the legacy
    `C:\ProgramData\DPE\revAgent` tree).
-2. Re-run `Install-RevAgentBridge.ps1` unchanged (no cleanup needed first).
-   Every step already `applied` is idempotent-safe to repeat (directory
-   creation, deterministic manifest content, service-registration
-   `skipped_already_registered`, enrollment `skipped_already_enrolled` once
-   a device credential exists) — see Step 9. If the SAME step fails again
-   with the same reason, stop and treat it as a real defect, not a transient
-   fault.
+2. Diagnose the exact failing step before retrying. A repeatable permission,
+   ownership or foreign-surface refusal requires correction/recovery, not an
+   unchanged installer rerun. Directory creation, deterministic owned manifest
+   publication, existing service detection and existing enrollment remain
+   idempotent only when their real preconditions still hold.
 3. If re-running is not desired (e.g., the failure indicates a bad payload
-   or a compromised machine), run `Uninstall-RevAgentBridge.ps1` — it only
-   ever removes what P-INST-1/P3-T9 created (`C:\Program
-   Files\revAgent\Bridge`, `C:\ProgramData\revAgent\bridge`, the add-in
-   payload/manifest) via the same anchor-preserving wipe planner, so a
-   partial install rolls back to a clean pre-EU-20 machine state without
-   ever touching the legacy stack or the anchors.
-4. The legacy stack (whatever the machine ran before this session) was
-   never modified by Step 3 — P-INST-1's complete root disjointness is the
-   reason no separate "restore the old install" step is needed here.
+   or a compromised machine), explicitly select **BridgeOwned**, first with
+   `-DryRun`, using the matching signed package and trusted keys:
+
+   ```powershell
+   & 'installer\bridge\Uninstall-RevAgentBridge.ps1' `
+     -Scope BridgeOwned -PackageRoot '<extracted signed package>' `
+     -TrustedKeysPath '<pinned trusted-keys.json>' -RevitVersion 2022 `
+     -MachineReportPath '<fresh external recovery report.json>' -DryRun
+   ```
+
+   After reviewing the plan, use a new external report path for the committed
+   invocation. This scope checks the complete inventory before removal,
+   rejects modified/unrecognized payloads, unknown state, reparse points and
+   foreign/deny ACLs, and deletes listed files followed by empty directories.
+   Missing files from a partial install are allowed. Only empty app-named
+   ancestors may be pruned; shared Autodesk directories are preserved.
+   Runtime/credential contents are not read or included in the cleanup report.
+   Normal service removal verifies the exact Bridge service image/account;
+   Revit must be closed. A refusal leaves unknown content for diagnosis.
+4. **LegacyCutover remains the default** and removes the original legacy
+   wipe-list/tasks/Codex sections; it is not BridgeOwned cleanup. BridgeOwned
+   never invokes those legacy operations. The Bridge files use disjoint roots,
+   but Step 3 can upgrade the managed `revAgent.addin` manifest. Preserve its
+   pre-install backup for rollback: cleanup removes only the exact current
+   Bridge manifest, preserves a recognized legacy manifest pointing elsewhere,
+   and refuses foreign/modified canonical-name files. Restore the original
+   manifest through the recorded legacy restoration procedure when required.
 
 ### R2 — Enrollment (Step 5) succeeds but the device is rejected/misbehaves
 
@@ -408,8 +425,11 @@ on where the failure occurred.
 Use this when the machine must be returned to exactly its pre-EU-20 state,
 regardless of what Steps 3-11 did:
 
-1. Run `Uninstall-RevAgentBridge.ps1` (committed, not dry-run) to remove
-   everything this package's installer created. Confirm
+1. Run `Uninstall-RevAgentBridge.ps1 -Scope BridgeOwned` with the matching
+   signed package, trusted keys, Revit version and fresh external report
+   described in R1 (committed after its dry-run). Confirm
+   `uninstall.scope == 'BridgeOwned'`, `uninstall.ownedCleanup.completed == true`
+   and
    `uninstall.anchors[].preserved == true` for all three anchors in the
    resulting report.
 2. Follow the existing frozen NAS-restore procedure (Section 8 step 4 of

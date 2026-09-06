@@ -7,6 +7,12 @@
     -WhatIf/-DryRun performs zero mutations.
 
 .DESCRIPTION
+    Scope LegacyCutover (default) retains the original legacy wipe/task/Codex
+    behavior. Scope BridgeOwned removes only verified Bridge payload, known
+    runtime state and an exact owned manifest. It requires the signed package,
+    trusted keys and a fresh report outside the affected roots. It does not
+    run legacy task/tree/Codex cleanup or modify shared Autodesk directory ACLs.
+
     This script is repo-preparation for EU-20: the true gate (destructive
     lab-machine removal) is NOT exercised here and is not granted. Run only
     against redirected roots in a non-machine-mutating test/dry-run context
@@ -15,11 +21,17 @@
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
+    [ValidateSet('LegacyCutover','BridgeOwned')][string]$Scope = 'LegacyCutover',
+    [string]$PackageRoot = '',
+    [string]$TrustedKeysPath = '',
+    [string]$RevitVersion = '2022',
     [string]$ProgramDataRoot = $env:ProgramData,
     [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
     [string]$CodexConfigPath = '',
     [string]$InstallRoot = '',
     [string]$StateRoot = '',
+    [string]$AddinProgramFilesRoot = '',
+    [string]$RevitAddinsRoot = '',
     [string]$MachineReportPath = '',
     [switch]$DryRun,
     [switch]$SkipScheduledTaskRemoval,
@@ -27,6 +39,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$Scope = if ($Scope -ieq 'BridgeOwned') { 'BridgeOwned' } else { 'LegacyCutover' }
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 Import-Module (Join-Path $PSScriptRoot 'lib\RevAgent.BridgeInstall.psm1') -Force
 Import-Module (Join-Path $RepoRoot 'installer\lib\RevAgent.Reporting.psm1') -Force
@@ -38,11 +51,14 @@ $steps = [System.Collections.Generic.List[object]]::new()
 $reportStatus = 'success'
 $reportMessage = 'Uninstall completed.'
 $errors = [System.Collections.Generic.List[string]]::new()
+$ownedReportValidated = $false
 
 function Get-BridgeLayoutArgs {
     $layoutArgs = @{}
     if ($InstallRoot) { $layoutArgs.InstallRoot = $InstallRoot }
     if ($StateRoot) { $layoutArgs.StateRoot = $StateRoot }
+    if ($AddinProgramFilesRoot) { $layoutArgs.AddinProgramFilesRoot = $AddinProgramFilesRoot }
+    if ($RevitAddinsRoot) { $layoutArgs.RevitAddinsRoot = $RevitAddinsRoot }
     return $layoutArgs
 }
 
@@ -59,6 +75,8 @@ $anchorHashesBefore = Get-RevAgentBridgeAnchorHashes -Anchors $anchors
 $isCurrentlyElevated = [System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 
 $uninstallSummary = [ordered]@{
+    scope                  = $Scope
+    ownedCleanup           = $null
     scheduledTasks         = @()
     legacyTrees             = @()
     codexConfig             = $null
@@ -72,6 +90,50 @@ try {
     $bridgeLayoutArgs = Get-BridgeLayoutArgs
     $layout = Get-RevAgentBridgeLayout @bridgeLayoutArgs
 
+    if ($Scope -eq 'BridgeOwned') {
+        if (-not $PackageRoot -or -not $TrustedKeysPath -or -not $MachineReportPath) { throw 'bridge_owned_package_keys_and_external_report_required' }
+        if ($CodexConfigPath -or $SkipScheduledTaskRemoval) { throw 'bridge_owned_legacy_options_not_applicable' }
+        $addin = Get-RevAgentBridgeAddinLayout -Layout $layout -RevitVersion $RevitVersion
+        $external = [IO.Path]::GetFullPath($MachineReportPath)
+        foreach ($root in @($layout.InstallRoot,$layout.StateRoot,$layout.AddinProgramFilesRoot,$layout.RevitAddinsRoot)) {
+            if ($external -ieq $root -or $external.StartsWith($root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'bridge_owned_report_inside_affected_root' }
+        }
+        [void](Assert-RevAgentBridgeNoReparsePoint -Path $external -GuardRoot ([IO.Path]::GetPathRoot($external)))
+        if ((Test-Path -LiteralPath $external) -or -not (Test-Path -LiteralPath (Split-Path $external -Parent) -PathType Container)) { throw 'bridge_owned_report_must_be_fresh_with_existing_parent' }
+        $ownedReportValidated = $true
+        if (-not $isDryRun -and -not $isCurrentlyElevated) { throw 'bridge_owned_cleanup_requires_administrator' }
+        $owned = Get-RevAgentBridgeOwnedCleanupPlan -Layout $layout -RevitVersion $RevitVersion -PackageRoot $PackageRoot -TrustedKeysPath $TrustedKeysPath -Anchors $anchors
+        if (@(Get-Process -Name Revit -ErrorAction SilentlyContinue).Count) { throw 'bridge_owned_revit_must_be_closed' }
+        $service = @(Get-CimInstance Win32_Service -Filter "Name='revAgentBridge'" -ErrorAction Stop)
+        if ($service.Count -gt 1) { throw 'bridge_owned_service_ambiguous' }
+        if ($service.Count -eq 1) {
+            if ($SkipServiceRemoval -or $service[0].PathName.Trim() -cne ('"'+$layout.HostExecutablePath+'"') -or $service[0].StartName -cne 'LocalSystem') { throw 'bridge_owned_service_identity_mismatch' }
+            [void](Invoke-RevAgentBridgeGuardedMutation -Target $layout.ServiceName -MutationAction 'stop_owned_bridge_service' -DryRun $isDryRun -Steps $steps -Apply {
+                Stop-Service -Name $layout.ServiceName -ErrorAction Stop
+                return 'stopped'
+            })
+            $record = Invoke-RevAgentBridgeGuardedMutation -Target $layout.ServiceName -MutationAction 'remove_owned_bridge_service' -DryRun $isDryRun -Steps $steps -Apply {
+                $saved=$ErrorActionPreference
+                try { $ErrorActionPreference='Continue'; $output=& "$env:SystemRoot\System32\sc.exe" delete $layout.ServiceName 2>&1; $exit=$LASTEXITCODE }
+                finally { $ErrorActionPreference=$saved }
+                if($exit -ne 0){throw "bridge_owned_service_delete_failed: exit=$exit"}
+                $deadline=[DateTime]::UtcNow.AddSeconds(10)
+                do { $remaining=@(Get-CimInstance Win32_Service -Filter "Name='revAgentBridge'" -ErrorAction Stop); if(-not $remaining.Count){return 'removed'};Start-Sleep -Milliseconds 100 } while([DateTime]::UtcNow -lt $deadline)
+                throw 'bridge_owned_service_removal_unverified'
+            }
+            $uninstallSummary.serviceRemoved = $record.status -eq 'applied'
+        }
+        if (-not $isDryRun) {
+            if (@(Get-Process -Name revagent-bridge,revagent-bridge-host -ErrorAction SilentlyContinue).Count) { throw 'bridge_owned_process_still_running' }
+            # Normal shutdown can flush known state files. Revalidate the whole
+            # inventory after shutdown, before the first file is removed.
+            $owned = Get-RevAgentBridgeOwnedCleanupPlan -Layout $layout -RevitVersion $RevitVersion -PackageRoot $PackageRoot -TrustedKeysPath $TrustedKeysPath -Anchors $anchors
+        }
+        $uninstallSummary.ownedCleanup = [ordered]@{ roots=$owned.roots; manifestDisposition=$owned.manifestDisposition; items=$owned.items; emptyAncestorCandidates=$owned.pruneEmpty; completed=$false; stateContentsRead=$false }
+        Invoke-RevAgentBridgeOwnedCleanupPlan -Plan $owned -DryRun $isDryRun -Steps $steps
+        $uninstallSummary.ownedCleanup.completed = -not $isDryRun
+    }
+    else {
     # --- 1. Managed scheduled tasks (named exactly, per E4/P-INST-3) ---
     if (-not $SkipScheduledTaskRemoval) {
         foreach ($taskName in Get-RevAgentBridgeManagedScheduledTaskNames) {
@@ -149,6 +211,7 @@ try {
                 detail = "sectionsRemoved=$($codexResult.sectionsRemoved -join ',')"
             })
     }
+    }
 
     # --- 5. Anchor preservation proof (hash-before == hash-after) ---
     $anchorHashesAfter = Get-RevAgentBridgeAnchorHashes -Anchors $anchors
@@ -187,7 +250,7 @@ $report = New-RevAgentBridgeMachineReport `
     -Uninstall ([pscustomobject]$uninstallSummary) `
     -Errors $errors.ToArray()
 
-try {
+if ($Scope -eq 'LegacyCutover') { try {
     $reportLayoutArgs = Get-BridgeLayoutArgs
     $layoutForReport = Get-RevAgentBridgeLayout @reportLayoutArgs
     $reportsDirectory = if (Test-Path -LiteralPath $layoutForReport.StateRoot) { $layoutForReport.ReportsDirectory } else { $null }
@@ -197,15 +260,21 @@ try {
 }
 catch {
     [void]$errors.Add("report_persistence_failed: $($_.Exception.Message)")
-}
+} }
 
-if ($MachineReportPath) {
+if ($MachineReportPath -and ($Scope -eq 'LegacyCutover' -or $ownedReportValidated)) {
     $reportJson = ($report | ConvertTo-Json -Depth 10)
     $reportDirectory = Split-Path -Parent $MachineReportPath
-    if ($reportDirectory -and -not (Test-Path -LiteralPath $reportDirectory)) {
+    if ($Scope -eq 'LegacyCutover' -and $reportDirectory -and -not (Test-Path -LiteralPath $reportDirectory)) {
         [void](New-Item -ItemType Directory -Path $reportDirectory -Force)
     }
-    Set-Content -LiteralPath $MachineReportPath -Value $reportJson -Encoding UTF8
+    if ($Scope -eq 'BridgeOwned') {
+        [void](Assert-RevAgentBridgeNoReparsePoint -Path $MachineReportPath -GuardRoot ([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($MachineReportPath))))
+        if (-not (Test-Path -LiteralPath $reportDirectory -PathType Container)) { throw 'bridge_owned_external_report_parent_changed' }
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes($reportJson)
+        $stream=[IO.File]::Open($MachineReportPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+    } else { Set-Content -LiteralPath $MachineReportPath -Value $reportJson -Encoding UTF8 }
 }
 
 Write-Output ([pscustomobject]$report)
