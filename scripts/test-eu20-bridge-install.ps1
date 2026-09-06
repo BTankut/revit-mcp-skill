@@ -277,6 +277,39 @@ try {
     Assert-True ($goodJson.expiresAtMs -gt 0) "Artifact expiresAtMs must be a positive integer."
 
     # =====================================================================
+    Write-Host "Test exact credential directory and file policies remain distinct"
+    & (Get-Module RevAgent.BridgeInstall) {
+        $make = {
+            param([bool]$Directory, [Security.AccessControl.InheritanceFlags]$Inheritance)
+            $security = if ($Directory) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
+            $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
+            $security.SetAccessRuleProtection($true, $false)
+            foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+                $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', $Inheritance, 'None', 'Allow'))
+            }
+            return $security
+        }
+        $directory = & $make $true ([Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit')
+        $file = & $make $false ([Security.AccessControl.InheritanceFlags]::None)
+        Assert-RevAgentBridgeExactCredentialAcl -Security $directory -Kind Directory
+        Assert-RevAgentBridgeExactCredentialAcl -Security $file -Kind File
+        $cases = @(
+            @{ security = (& $make $true ([Security.AccessControl.InheritanceFlags]::None)); kind = 'Directory' },
+            @{ security = (& $make $true ([Security.AccessControl.InheritanceFlags]::ContainerInherit)); kind = 'Directory' },
+            @{ security = (& $make $true ([Security.AccessControl.InheritanceFlags]::ObjectInherit)); kind = 'Directory' },
+            @{ security = $directory; kind = 'File' },
+            @{ security = $file; kind = 'Directory' }
+        )
+        foreach ($case in $cases) {
+            $refused = $false
+            try { Assert-RevAgentBridgeExactCredentialAcl -Security $case.security -Kind $case.kind }
+            catch { $refused = $_.Exception.Message -ceq 'bridge_credential_acl_verification_failed' }
+            if (-not $refused) { throw 'credential_file_directory_policy_interchanged' }
+        }
+    }
+
+    # =====================================================================
     Write-Host "Test ACL helpers invoke icacls only through the injectable invoker (no real icacls.exe call)"
     # =====================================================================
     $icaclsCalls = [System.Collections.Generic.List[string]]::new()
@@ -298,8 +331,8 @@ try {
     Assert-True ($icaclsCalls[0] -match '/grant:r') 'Establish explicit access before removing inherited access.'
     Assert-True ($icaclsCalls[1] -match '/inheritance:r') 'Remove inheritance only after granting access.'
     Assert-True ($icaclsCalls[2] -match '/setowner \*S-1-5-18') 'Transfer ownership last using a numeric SID.'
-    Assert-True (($icaclsCalls -join '|') -match '\*S-1-5-18:\(F\)') 'Grant SYSTEM FullControl by SID.'
-    Assert-True (($icaclsCalls -join '|') -match '\*S-1-5-32-544:\(F\)') 'Grant Administrators FullControl by SID.'
+    Assert-True (($icaclsCalls -join '|') -match '\*S-1-5-18:\(OI\)\(CI\)\(F\)') 'Grant SYSTEM inheritable directory FullControl by SID.'
+    Assert-True (($icaclsCalls -join '|') -match '\*S-1-5-32-544:\(OI\)\(CI\)\(F\)') 'Grant Administrators inheritable directory FullControl by SID.'
     Assert-True (($icaclsCalls -join '|') -notmatch '\*S-1-5-32-545:') 'Narrow credential ACL must not grant interactive Users any access.'
     Assert-Equal (Get-Acl -LiteralPath $aclChild).Sddl $aclBefore 'No-op invoker must leave real ACL unchanged.'
     $failurePropagated = $false
@@ -714,7 +747,7 @@ try {
             param([string]$LiteralPath, $ErrorAction)
             if ($LiteralPath -in @($realRunFixtureLayout.CredentialDirectory, $freshCredentialPath)) {
                 $security = [Security.AccessControl.DirectorySecurity]::new()
-                $security.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)')
+                $security.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
                 return $security
             }
             if($LiteralPath -in $distributionPaths){

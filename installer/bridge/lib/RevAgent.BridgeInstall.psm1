@@ -602,12 +602,13 @@ function Set-RevAgentBridgeSystemOnlyAcl {
 
     # Do not silently remove unrelated explicit permissions, or attempt to
     # repair a deny ACE. Inherited allows are removed only after the intended
-    # explicit access is established. The same non-propagating policy applies
-    # to both the credential directory and each individually protected file.
+    # explicit access is established. Match the C# credential directory policy;
+    # each credential file remains individually protected and non-propagating.
     $sidType = [System.Security.Principal.SecurityIdentifier]
     $allowedSids = @('S-1-5-18', 'S-1-5-32-544')
     [void](Assert-RevAgentBridgeNoReparsePoint -Path $Path -GuardRoot (Split-Path -Parent $Path))
     $before = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $kind = if ($before -is [System.Security.AccessControl.DirectorySecurity]) { 'Directory' } else { 'File' }
     foreach ($rule in $before.GetAccessRules($true, $true, $sidType)) {
         if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
             (-not $rule.IsInherited -and $rule.IdentityReference.Value -notin $allowedSids)) {
@@ -634,19 +635,25 @@ function Set-RevAgentBridgeSystemOnlyAcl {
         }
     }
 
-    [void](& $IcaclsInvoker @($Path, '/grant:r', '*S-1-5-18:(F)', '*S-1-5-32-544:(F)', '/Q'))
+    $rights = if ($kind -eq 'Directory') { '(OI)(CI)(F)' } else { '(F)' }
+    [void](& $IcaclsInvoker @($Path, '/grant:r', ('*S-1-5-18:' + $rights), ('*S-1-5-32-544:' + $rights), '/Q'))
     [void](& $IcaclsInvoker @($Path, '/inheritance:r', '/Q'))
     [void](& $IcaclsInvoker @($Path, '/setowner', '*S-1-5-18', '/Q'))
 
-    Assert-RevAgentBridgeExactCredentialAcl -Security (Get-Acl -LiteralPath $Path -ErrorAction Stop)
+    Assert-RevAgentBridgeExactCredentialAcl -Security (Get-Acl -LiteralPath $Path -ErrorAction Stop) -Kind $kind
 }
 
 function Assert-RevAgentBridgeExactCredentialAcl {
     param([Parameter(Mandatory=$true)][System.Security.AccessControl.FileSystemSecurity]$Security,
-        [string[]]$AllowedOwnerSids = @('S-1-5-18'))
+        [string[]]$AllowedOwnerSids = @('S-1-5-18'),
+        [ValidateSet('File','Directory')][string]$Kind = 'File')
     $sidType = [System.Security.Principal.SecurityIdentifier]
+    $expectedType = if ($Kind -eq 'Directory') { [System.Security.AccessControl.DirectorySecurity] } else { [System.Security.AccessControl.FileSecurity] }
+    $inheritance = if ($Kind -eq 'Directory') {
+        [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else { [System.Security.AccessControl.InheritanceFlags]::None }
     $rules = @($Security.GetAccessRules($true, $true, $sidType))
-    if (-not $Security.AreAccessRulesProtected -or $Security.GetOwner($sidType).Value -cnotin $AllowedOwnerSids -or $rules.Count -ne 2) {
+    if (-not $expectedType.IsInstanceOfType($Security) -or -not $Security.AreAccessRulesProtected -or $Security.GetOwner($sidType).Value -cnotin $AllowedOwnerSids -or $rules.Count -ne 2) {
         throw 'bridge_credential_acl_verification_failed'
     }
     foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
@@ -654,7 +661,7 @@ function Assert-RevAgentBridgeExactCredentialAcl {
         if ($matches.Count -ne 1 -or $matches[0].IsInherited -or
             $matches[0].AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
             $matches[0].FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl -or
-            $matches[0].InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]::None -or
+            $matches[0].InheritanceFlags -ne $inheritance -or
             $matches[0].PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None) {
             throw 'bridge_credential_acl_verification_failed'
         }
@@ -671,7 +678,7 @@ function Write-RevAgentBridgeCredentialArtifact {
     )
     $fullPath = Assert-RevAgentBridgeNoReparsePoint -Path $Path -GuardRoot $GuardRoot
     $directory = Split-Path -Parent $fullPath
-    Assert-RevAgentBridgeExactCredentialAcl -Security (Get-Acl -LiteralPath $directory -ErrorAction Stop)
+    Assert-RevAgentBridgeExactCredentialAcl -Security (Get-Acl -LiteralPath $directory -ErrorAction Stop) -Kind Directory
     if (Test-Path -LiteralPath $fullPath) { throw 'bridge_credential_artifact_already_exists' }
 
     # Passing security to CreateNew avoids the token default DACL, including
