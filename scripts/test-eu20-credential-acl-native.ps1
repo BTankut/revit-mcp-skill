@@ -82,12 +82,26 @@ try{
     $stage='foreign_ace_refusal'
     foreach($deny in @($false,$true)){
         $foreign=Join-Path $root ('foreign-'+$deny);[void][IO.Directory]::CreateDirectory($foreign);$a=Get-Acl -LiteralPath $foreign
+        $originalSddl=$a.Sddl
         $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'Read',$(if($deny){'Deny'}else{'Allow'})))
         Set-Acl -LiteralPath $foreign -AclObject $a;$before=(Get-Acl -LiteralPath $foreign).Sddl;$refused=$false
-        try{Set-RevAgentBridgeSystemOnlyAcl -Path $foreign}catch{$refused=$_.Exception.Message -ceq 'bridge_credential_acl_unexpected_ace'}
-        Check $refused "foreign or deny refusal $deny";Check ((Get-Acl -LiteralPath $foreign).Sddl -ceq $before) "refusal preserves DACL $deny"
-        $refused=$false;try{Write-RevAgentBridgeCredentialArtifact -Path (Join-Path $foreign 'refused.json') -Bytes ([byte[]]@(1,2,3)) -GuardRoot $foreign}catch{$refused=$true}
-        Check $refused "artifact rejects foreign or deny parent $deny";Check (@(Get-ChildItem -LiteralPath $foreign -Force).Count -eq 0) "refused parent creates no file $deny"
+        @{path=$foreign;originalSddl=$originalSddl;testSddl=$before}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $root ('foreign-acl-'+$deny+'.json')) -Encoding UTF8
+        try{
+            try{Set-RevAgentBridgeSystemOnlyAcl -Path $foreign}catch{$refused=$_.Exception.Message -ceq 'bridge_credential_acl_unexpected_ace'}
+            Check $refused "foreign or deny refusal $deny";Check ((Get-Acl -LiteralPath $foreign).Sddl -ceq $before) "refusal preserves DACL $deny"
+            $refused=$false;try{Write-RevAgentBridgeCredentialArtifact -Path (Join-Path $foreign 'refused.json') -Bytes ([byte[]]@(1,2,3)) -GuardRoot $foreign}catch{$refused=$true}
+            Check $refused "artifact rejects foreign or deny parent $deny"
+            Check ((Get-Acl -LiteralPath $foreign).Sddl -ceq $before) "artifact refusal preserves DACL $deny"
+        }finally{
+            # Everyone Deny Read also blocks this test's directory enumeration.
+            # Restore only the exact fixture baseline, never unexpected drift.
+            if((Get-Acl -LiteralPath $foreign).Sddl -cne $before){throw 'native_foreign_fixture_acl_drift_preserved'}
+            $restore=[Security.AccessControl.DirectorySecurity]::new();$restore.SetSecurityDescriptorSddlForm($originalSddl)
+            $directory=[IO.DirectoryInfo]::new($foreign)
+            if($PSVersionTable.PSEdition -eq 'Desktop'){$directory.SetAccessControl($restore)}else{[IO.FileSystemAclExtensions]::SetAccessControl($directory,$restore)}
+            Check ((Get-Acl -LiteralPath $foreign).Sddl -ceq $originalSddl) "exact fixture ACL restored before inspection $deny"
+        }
+        Check (@(Get-ChildItem -LiteralPath $foreign -Force).Count -eq 0) "refused parent creates no file $deny"
         [IO.Directory]::Delete($foreign,$false)
     }
     $stage='wrong_directory_policy_refusal'
