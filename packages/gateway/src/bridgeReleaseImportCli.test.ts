@@ -6,7 +6,7 @@ import { canonicalizeJson, type JsonValue } from "@revagent/protocol";
 import { describe, expect, it, vi } from "vitest";
 
 import { bridgeManifestDigest } from "./bridgeManifestSignature.js";
-import { importBridgeRelease } from "./bridgeReleaseImportCli.js";
+import { importBridgeRelease, type BridgeReleasePublisher } from "./bridgeReleaseImportCli.js";
 import { FilesystemBridgeReleaseObjectStore } from "./bridgeReleaseObjectStore.js";
 
 describe("Bridge release import", () => {
@@ -50,19 +50,26 @@ describe("Bridge release import", () => {
           publicKeyXml: xml, publicKeyFingerprint: fingerprint, algorithm: "RS256",
         } } })),
       ]);
-      const publishBridgeUpdateRelease = vi.fn(async () => undefined);
+      let publishCount = 0;
+      let published: Parameters<BridgeReleasePublisher["publishBridgeUpdateRelease"]>[0] | undefined;
+      const publisher: BridgeReleasePublisher = {
+        async publishBridgeUpdateRelease(input) {
+          publishCount += 1;
+          published = input;
+        },
+      };
       const objects = new FilesystemBridgeReleaseObjectStore(root);
       const result = await importBridgeRelease({ artifactRoot: artifacts, expectedArtifactId: "12345",
         expectedArtifactDigest: artifactDigest, expectedRepository: "BTankut/revAgent", expectedHeadSha: "a".repeat(40),
         trustedKeysPath: join(root, "trusted.json"), tenantIds: ["10000000-0000-4000-8000-000000000001"],
         deviceRings: [{ tenantId: "10000000-0000-4000-8000-000000000001", deviceId: "20000000-0000-4000-8000-000000000001", ring: 0 }],
         releasedBy: "github-actions",
-      }, { publisher: { publishBridgeUpdateRelease }, objects });
+      }, { publisher, objects });
       expect(result.releaseId).toBe(releaseId);
-      expect(publishBridgeUpdateRelease).toHaveBeenCalledTimes(1);
-      const published = publishBridgeUpdateRelease.mock.calls[0]![0];
-      expect(published.release.components.bridge.sha256).toBe(manifest.components[0]!.sha256);
-      expect(published.release.components.addin.sha256).toBe(manifest.components[1]!.sha256);
+      expect(publishCount).toBe(1);
+      if (published === undefined) throw new Error("publisher fixture did not capture the release");
+      expect(published.release.components.bridge.sha256).toBe(createHash("sha256").update(bridge).digest("hex"));
+      expect(published.release.components.addin.sha256).toBe(createHash("sha256").update(addin).digest("hex"));
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

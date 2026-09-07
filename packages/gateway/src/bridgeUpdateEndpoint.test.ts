@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
-import { GATEWAY_AUTH_CONTRACT_VERSION, type DeviceAuthContext, type IdentityPort } from "./authContext.js";
+import { GATEWAY_AUTH_CONTRACT_VERSION, type AuthContext, type DeviceAuthContext, type IdentityPort } from "./authContext.js";
+import type { GatewayPortResult } from "./gatewayPorts.js";
 import { FilesystemBridgeReleaseObjectStore } from "./bridgeReleaseObjectStore.js";
 import { createBridgeUpdateEndpoint } from "./bridgeUpdateEndpoint.js";
 import type { BridgeUpdateReleaseAuthority } from "./releaseChannelStore.js";
@@ -17,10 +18,12 @@ const releaseId = "30000000-0000-4000-8000-000000000001";
 function identity(status: DeviceAuthContext["deviceStatus"] = "active"): IdentityPort {
   return Object.freeze({
     kind: "oidc" as const,
-    async authenticateNorthRequest() { return { ok: false as const, error: { code: "unauthenticated" as const, message: "unused" } }; },
-    async authenticateDevice(input) {
+    async authenticateNorthRequest(): Promise<GatewayPortResult<AuthContext>> {
+      return { ok: false as const, port: "identity" as const, code: "unavailable" as const, message: "unused" };
+    },
+    async authenticateDevice(input: Parameters<IdentityPort["authenticateDevice"]>[0]): Promise<GatewayPortResult<DeviceAuthContext>> {
       if (input.deviceToken !== "device-token" || input.claimedDeviceId !== deviceId || input.machineFingerprint !== fingerprint) {
-        return { ok: false as const, error: { code: "unauthenticated" as const, message: "refused" } };
+        return { ok: false as const, port: "identity" as const, code: "unavailable" as const, message: "refused" };
       }
       return { ok: true as const, value: Object.freeze({
         contractVersion: GATEWAY_AUTH_CONTRACT_VERSION,
