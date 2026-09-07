@@ -1168,7 +1168,7 @@ function Test-RevAgentBridgeOwnedStatePath {
     $path=$Relative.Replace('\','/')
     # Exact paths from BridgeInstallLayout; atomic residue suffixes from
     # AtomicCredentialFileWriter. Contents of credentials are never read.
-    if($Directory){return $path -eq '' -or $path -in @('credentials','reports','logs','logs/host','logs/worker','bundle-extract','artifact-spool') -or $path -match '^bundle-extract/(revagent-bridge|revagent-bridge-host)(/[A-Za-z0-9_+.-]{1,128})?$'}
+    if($Directory){return $path -eq '' -or $path -in @('credentials','reports','logs','logs/host','logs/worker','bundle-extract','artifact-spool') -or $path -match '^bundle-extract/(revagent-bridge|revagent-bridge-host)(/(?=[^/]{1,128}$)[A-Za-z0-9_+.-]+={0,2})?$'}
     # RbpJournalWriterLease retains its lock file after Dispose; the carrier
     # spool producer similarly retains its empty startup root. Carrier children
     # remain unknown here and must not be swept as arbitrary state content.
@@ -1185,7 +1185,7 @@ function Test-RevAgentBridgeOwnedStatePath {
     # The host assigns this dedicated .NET bundle extraction root for the
     # two published executables (HostCommandDispatcher/WorkerSupervisor).
     # Only native library leaves in that runtime-owned shape are admitted.
-    return $path -match '^bundle-extract/(revagent-bridge|revagent-bridge-host)/[A-Za-z0-9_+.-]{1,128}/[A-Za-z0-9_.-]+\.dll$'
+    return $path -match '^bundle-extract/(revagent-bridge|revagent-bridge-host)/(?=[^/]{1,128}/)[A-Za-z0-9_+.-]+={0,2}/[A-Za-z0-9_.-]+\.dll$'
 }
 
 function Get-RevAgentBridgeOwnedCleanupPlan {
