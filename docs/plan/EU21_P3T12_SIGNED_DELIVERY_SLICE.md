@@ -34,7 +34,27 @@ Hedef | Plan satırı | Kabul | Kapsam | Forecast
 
 ## Local source candidate checkpoint — 2026-09-08
 
-Status: locally green draft source candidate. Scope amendment: none.
+Status: repair in progress after final review. Scope amendment: composition
+fixture entrypoint below.
+
+### Scope amendment — 2026-09-08 final-review composition fixture
+
+The final review found that the C# TLS poller fixture independently returned
+manifest and ZIP bytes, so it did not prove the real Gateway import,
+PostgreSQL release authority, filesystem release objects, M5 device-authenticated
+endpoint, and poller in one chain. The exact allowlist is amended with one
+test-only orchestration entrypoint:
+
+- `packages/gateway/src/bridgeUpdateComposedFixtureCli.ts` (new)
+
+It may accept generated fixture material and an explicitly named disposable
+loopback PostgreSQL instance, import through the production import function,
+mount the real endpoint/store behind loopback TLS, and emit only bounded public
+fixture coordinates. It must not expose a production bypass, accept production
+keys, publish externally, or weaken runtime authentication. The existing
+allowed `bridgeReleaseImportCli.ts`, its test, `bridge-cd.yml`, and
+`eu12Persistence.integration.test.ts` own the Actions-receipt and retained-volume
+PostgreSQL 16 restart corrections; no other path is added.
 
 Implemented within the exact allowlist:
 
