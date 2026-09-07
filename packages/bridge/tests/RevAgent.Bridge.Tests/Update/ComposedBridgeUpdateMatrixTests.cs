@@ -251,31 +251,31 @@ public sealed class ComposedBridgeUpdateMatrixTests
         byte[] addin,
         string version,
         long sequence) => new()
-    {
-        ["schemaVersion"] = 1,
-        ["channel"] = "stable",
-        ["version"] = version,
-        ["releaseSequence"] = sequence,
-        ["components"] = new JArray(
+        {
+            ["schemaVersion"] = 1,
+            ["channel"] = "stable",
+            ["version"] = version,
+            ["releaseSequence"] = sequence,
+            ["components"] = new JArray(
             Component("bridge", version, "https://objects.example.test/bridge.zip", bridge),
             Component("addin", version, "https://objects.example.test/addin.zip", addin)),
-        ["rolloutPercent"] = 100,
-        ["minSupportedVersion"] = "1.0.0",
-        ["notes"] = "composed EU-21 matrix",
-    };
+            ["rolloutPercent"] = 100,
+            ["minSupportedVersion"] = "1.0.0",
+            ["notes"] = "composed EU-21 matrix",
+        };
 
     private static JObject Component(
         string name,
         string version,
         string url,
         byte[] bytes) => new()
-    {
-        ["name"] = name,
-        ["version"] = version,
-        ["sha256"] = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
-        ["sizeBytes"] = bytes.LongLength,
-        ["url"] = url,
-    };
+        {
+            ["name"] = name,
+            ["version"] = version,
+            ["sha256"] = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+            ["sizeBytes"] = bytes.LongLength,
+            ["url"] = url,
+        };
 
     private static JObject Envelope(RSA rsa, JToken content)
     {
@@ -534,7 +534,7 @@ public sealed class ComposedBridgeUpdateMatrixTests
             ValueTask.FromResult(new WorkerProcessDiagnostics("", "", false, false));
         public void KillTree() => Complete(-9);
         internal void Complete(int exitCode) => _exit.TrySetResult(exitCode);
-        public void Dispose() {}
+        public void Dispose() { }
     }
 
     private sealed class NullBridgeLog : IBridgeLog
