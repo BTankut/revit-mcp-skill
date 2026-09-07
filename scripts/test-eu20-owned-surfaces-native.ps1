@@ -68,6 +68,11 @@ try{
     $produced=Get-Content -LiteralPath (Join-Path $root 'runtime-footprint.json') -Raw|ConvertFrom-Json
     Check ($produced.disposed -and $produced.writerLockRetained -and $produced.emptySpoolRetained -and $produced.stateRoot -ceq $layout.StateRoot) 'actual journal/spool producers disposed before cleanup'
     Check ((Test-Path -LiteralPath ($layout.JournalPath+'.writer.lock')) -and (Test-Path -LiteralPath (Join-Path $layout.StateRoot 'artifact-spool'))) 'normal clean-stop footprint actually present'
+    $actualBundleId='EvRJBzBTzkY8ChjFumZ_JPUkO+eiczg='
+    $actualBundleDirectory=Join-Path $layout.BundleExtractionRoot (Join-Path 'revagent-bridge' $actualBundleId)
+    $actualBundleLibrary=Join-Path $actualBundleDirectory 'e_sqlite3.dll'
+    [void][IO.Directory]::CreateDirectory($actualBundleDirectory)
+    [IO.File]::WriteAllBytes($actualBundleLibrary,[byte[]]@(10,20,30,40))
     $stage='owned_distribution_and_manifest'
     [IO.File]::WriteAllText((Join-Path $layout.StateRoot ('.bridge-config.json.'+[guid]::NewGuid().ToString('N')+'.tmp')),'public interrupted-write fixture')
     $contract=New-RevAgentBridgeAddinManifestContract -AssemblyPath $addin.AssemblyPath
@@ -107,14 +112,19 @@ try{
     $stage='real_uninstaller_dryrun_and_cleanup'
     $uninstall=Join-Path $repo 'installer\bridge\Uninstall-RevAgentBridge.ps1'
     $cleanupArgs=@{Scope='BridgeOwned';PackageRoot=$package.PackageRoot;TrustedKeysPath=$package.TrustedKeysPath;RevitVersion='2022';ProgramDataRoot=$legacyData;InstallRoot=$layout.InstallRoot;StateRoot=$layout.StateRoot;AddinProgramFilesRoot=$layout.AddinProgramFilesRoot;RevitAddinsRoot=$layout.RevitAddinsRoot}
+    $plan=Get-RevAgentBridgeOwnedCleanupPlan -Layout $layout -RevitVersion 2022 -PackageRoot $package.PackageRoot -TrustedKeysPath $package.TrustedKeysPath
+    Check (@($plan.items|Where-Object{$_.path -ieq $actualBundleDirectory -and $_.kind -ceq 'directory'}).Count -eq 1) 'complete plan admits genuine padded bundle directory'
+    Check (@($plan.items|Where-Object{$_.path -ieq $actualBundleLibrary -and $_.kind -ceq 'file' -and $_.stateContentNotRead -and $null -eq $_.sha256}).Count -eq 1) 'complete plan admits padded bundle native DLL without reading state content'
     $beforeOwned=Digest (Join-Path $root 'program');$beforeState=Digest (Join-Path $root 'data')
     $dry=& $uninstall @cleanupArgs -MachineReportPath (Join-Path $root 'owned-dryrun.json') -DryRun
     Check ($dry.status -ceq 'success' -and $dry.dryRun -and $dry.uninstall.scope -ceq 'BridgeOwned') 'explicit owned dry-run successful'
     Check ((Digest (Join-Path $root 'program')) -ceq $beforeOwned -and (Digest (Join-Path $root 'data')) -ceq $beforeState) 'dry-run changes no owned bytes/ACLs'
+    Check (Test-Path -LiteralPath $actualBundleLibrary -PathType Leaf) 'dry-run preserves padded bundle native DLL'
     # Partial install: one signed file already absent must remain safe.
     [IO.File]::Delete($layout.WorkerExecutablePath)
     $clean=& $uninstall @cleanupArgs -MachineReportPath (Join-Path $root 'owned-cleanup.json')
     Check ($clean.status -ceq 'success' -and $clean.uninstall.ownedCleanup.completed) 'actual explicit owned cleanup successful'
+    Check (-not(Test-Path -LiteralPath $actualBundleDirectory)) 'actual cleanup removes padded bundle directory'
     foreach($path in @($layout.InstallRoot,$layout.StateRoot,$addin.AddinBinRoot,$addin.ManifestPath)){Check (-not(Test-Path -LiteralPath $path)) 'owned target absent'}
     Check (-not(Test-Path -LiteralPath (Join-Path $layout.AddinProgramFilesRoot '2022'))) 'owned version directory absent'
     foreach($path in @($layout.AddinProgramFilesRoot,(Split-Path $layout.InstallRoot -Parent),(Split-Path $layout.StateRoot -Parent))){Check (-not(Test-Path -LiteralPath $path)) 'empty app ancestor absent'}

@@ -47,3 +47,36 @@ idempotency remain outside this correction. No lab, model or deployment
 action is part of this source change. Automatic production signing after
 merge requires its concrete operator decision once the candidate is ready;
 the already consumed #415 approval is not reused for a new signing effect.
+
+## Source candidate evidence
+
+The implementation admits one or two trailing Base64 padding characters in
+the existing bundle-ID segment while retaining the 128-character total bound,
+the two exact executable namespaces and native-DLL-only leaf shape. Regression
+fixtures use the observed `EvRJBzBTzkY8ChjFumZ_JPUkO+eiczg=` /
+`e_sqlite3.dll` layout through the complete owned cleanup plan and dry-run.
+Embedded padding, more than two padding characters, an over-length padded ID,
+and a non-DLL leaf remain refused. The redirected native fixture also requires
+the same directory to survive dry-run and disappear on committed cleanup.
+
+Local source validation on 2026-09-07:
+
+- PowerShell parser: Windows PowerShell `5.1.26100.9168` and PowerShell
+  `7.6.5`, all three changed PowerShell files passed.
+- Focused portable installer/uninstaller suite: passed independently under
+  both engines.
+- Raw receipts: `local-syntax.json` SHA-256
+  `24073C70DE78C0718FED17CA219F3364179CE397374E1A1BFB943D5A3E1E7F14`;
+  `portable-ps5.log` and `portable-ps7.log` each SHA-256
+  `FCCF010816FDE924B21032101A0BE7BFD292F597A840B786298200E253D08157`.
+
+The authorized elevated Windows PowerShell/PowerShell native fixture and the
+broad delivery gates remain pending parent execution against the final source
+commit. This record does not claim EU-20/M6 acceptance, live model validation,
+live installer idempotency, signing, merge or publish.
+
+Forecast was 45-75 active engineering minutes. Source correction reached
+dual-engine portable green 6 elapsed minutes after the scope-record commit,
+39-69 minutes under forecast. Park List remains publisher-handled live Revit
+validation, live installer idempotency, privileged native evidence, protected
+PR review/checks, the new production-signing decision, merge and publish.

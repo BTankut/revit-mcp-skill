@@ -1009,6 +1009,16 @@ try {
     Write-Host 'Test BridgeOwned report guards preserve existing reports and affected roots'
     # Exercise the real signed-package/owned-inventory/dry-run path without
     # pretending this non-admin process owns SYSTEM/Administrators ACLs.
+    $actualBundleId='EvRJBzBTzkY8ChjFumZ_JPUkO+eiczg='
+    $actualBundleDirectory=Join-Path $realRunLayout.BundleExtractionRoot (Join-Path 'revagent-bridge' $actualBundleId)
+    $actualBundleLibrary=Join-Path $actualBundleDirectory 'e_sqlite3.dll'
+    [void][IO.Directory]::CreateDirectory($actualBundleDirectory)
+    [IO.File]::WriteAllBytes($actualBundleLibrary,[byte[]]@(10,20,30,40))
+    $overlongPaddedBundleRelative='bundle-extract/revagent-bridge/'+('a'*128)+'='
+    $triplePaddedBundleRelative='bundle-extract/revagent-bridge/abc==='
+    $bundleShapeProbe={param([string]$Relative) Test-RevAgentBridgeOwnedStatePath -Relative $Relative -Directory $true}
+    Assert-True (-not(& (Get-Module RevAgent.BridgeInstall) $bundleShapeProbe $overlongPaddedBundleRelative)) 'Padding must remain inside the existing 128-character total bundle-ID bound.'
+    Assert-True (-not(& (Get-Module RevAgent.BridgeInstall) $bundleShapeProbe $triplePaddedBundleRelative)) 'Bundle IDs with more than two trailing padding characters must remain refused.'
     $oldReader=& (Get-Module RevAgent.BridgeInstall) {Get-Item Function:Get-Acl -ErrorAction SilentlyContinue}
     $oldReaderBody=if($oldReader){$oldReader.ScriptBlock}else{$null}
     $cleanupAncestorPaths=@((Split-Path $realRunLayout.InstallRoot -Parent),(Split-Path $realRunLayout.StateRoot -Parent),$realRunLayout.AddinProgramFilesRoot,(Split-Path $realRunLayout.AddinProgramFilesRoot -Parent))
@@ -1022,14 +1032,26 @@ try {
     }.GetNewClosure()
     Set-Item Function:global:Get-Acl -Value $ownedMetadataReader
     try {
+        $embeddedPaddingDirectory=Join-Path $realRunLayout.BundleExtractionRoot 'revagent-bridge\abc=def'
+        [void][IO.Directory]::CreateDirectory($embeddedPaddingDirectory)
+        [IO.File]::WriteAllBytes((Join-Path $embeddedPaddingDirectory 'e_sqlite3.dll'),[byte[]]@(1))
+        Assert-ThrowsLike {Get-RevAgentBridgeOwnedCleanupPlan -Layout $realRunLayout -RevitVersion 2022 -PackageRoot $goodFixture.PackageRoot -TrustedKeysPath $goodFixture.TrustedKeysPath} 'bridge_owned_unknown_state_path' 'Bundle padding is accepted only at the end of the bounded ID segment.'
+        Remove-Item -LiteralPath $embeddedPaddingDirectory -Recurse -Force
+        $unsupportedBundleLeaf=Join-Path $actualBundleDirectory 'payload.json'
+        [IO.File]::WriteAllText($unsupportedBundleLeaf,'unsupported')
+        Assert-ThrowsLike {Get-RevAgentBridgeOwnedCleanupPlan -Layout $realRunLayout -RevitVersion 2022 -PackageRoot $goodFixture.PackageRoot -TrustedKeysPath $goodFixture.TrustedKeysPath} 'bridge_owned_unknown_state_path' 'Padded bundle directories still admit native DLL leaves only.'
+        Remove-Item -LiteralPath $unsupportedBundleLeaf -Force
         $plan=Get-RevAgentBridgeOwnedCleanupPlan -Layout $realRunLayout -RevitVersion 2022 -PackageRoot $goodFixture.PackageRoot -TrustedKeysPath $goodFixture.TrustedKeysPath
         Assert-True ($plan.items.Count -gt 3) 'Owned plan must include actual signed payload and state entries.'
+        Assert-Equal @($plan.items|Where-Object{$_.path -ieq $actualBundleDirectory -and $_.kind -ceq 'directory'}).Count 1 'Owned plan must admit the genuine padded bundle directory shape.'
+        Assert-Equal @($plan.items|Where-Object{$_.path -ieq $actualBundleLibrary -and $_.kind -ceq 'file' -and $_.stateContentNotRead -and $null -eq $_.sha256}).Count 1 'Owned plan must admit the native DLL leaf without reading state content.'
         Assert-True (@($plan.items|Where-Object{$_.stateContentNotRead -and $_.sha256}).Count -eq 0) 'State/credential contents must not be hashed into the report.'
         $preview=& (Join-Path $bridgeRoot 'Uninstall-RevAgentBridge.ps1') -Scope BridgeOwned -PackageRoot $goodFixture.PackageRoot -TrustedKeysPath $goodFixture.TrustedKeysPath @realRunLayoutArgs -ProgramDataRoot (Join-Path $realRunTemp 'absent-legacy-data') -MachineReportPath (Join-Path $realRunTemp 'owned-preview.json') -DryRun
         Assert-Equal $preview.status 'success' 'Explicit owned dry-run must succeed with verified test metadata.'
         Assert-Equal $preview.uninstall.scope 'BridgeOwned' 'Report must identify the explicit scope.'
         Assert-True (-not $preview.uninstall.ownedCleanup.completed -and $preview.uninstall.legacyTrees.Count -eq 0) 'Dry-run must not claim removal or run legacy cleanup.'
         Assert-True (Test-Path -LiteralPath $realRunLayout.HostExecutablePath) 'Owned dry-run preserves signed payload.'
+        Assert-True (Test-Path -LiteralPath $actualBundleLibrary -PathType Leaf) 'Owned dry-run preserves the padded bundle native DLL.'
     } finally {if($oldReaderBody){Set-Item Function:global:Get-Acl -Value $oldReaderBody}else{& (Get-Module RevAgent.BridgeInstall) {Remove-Item Function:Get-Acl}}}
     $ownedReport = Join-Path $realRunTemp 'must-preserve-report.json'
     [IO.File]::WriteAllText($ownedReport,'preserve-existing-report')
