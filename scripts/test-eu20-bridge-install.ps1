@@ -18,7 +18,9 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = ""
+    [string]$RepoRoot = "",
+    [switch]$BundleGrammarProbe,
+    [string]$BundleGrammarCulture = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,11 +31,43 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 $RepoRoot = [System.IO.Path]::GetFullPath($RepoRoot)
 $bridgeRoot = Join-Path $RepoRoot "installer\bridge"
 
+if ($BundleGrammarProbe) {
+    if ($BundleGrammarCulture -notin @('tr-TR','en-US')) { throw 'bundle_grammar_probe_culture_invalid' }
+    $probeCulture = [Globalization.CultureInfo]::GetCultureInfo($BundleGrammarCulture)
+    [Globalization.CultureInfo]::CurrentCulture = $probeCulture
+    [Globalization.CultureInfo]::CurrentUICulture = $probeCulture
+}
+
 Import-Module (Join-Path $bridgeRoot "lib\RevAgent.BridgeInstall.psm1") -Force
 Import-Module (Join-Path $RepoRoot "installer\lib\RevAgent.DistributionIntegrity.psm1") -Force
 Import-Module (Join-Path $RepoRoot "installer\lib\RevAgent.Reporting.psm1") -Force
 Import-Module (Join-Path $RepoRoot "installer\lib\RevAgent.RevitVersions.psm1") -Force
 Import-Module (Join-Path $RepoRoot "installer\lib\RevAgent.CodexRegistration.psm1") -Force
+
+if ($BundleGrammarProbe) {
+    $actualBundleId = '_bye7OuDW05BPw_IhGRjA7qrECW1Wuk='
+    $cases = @(
+        @{ Name='actual_directory'; Relative="bundle-extract/revagent-bridge/$actualBundleId"; Directory=$true; Expected=$true },
+        @{ Name='actual_library'; Relative="bundle-extract/revagent-bridge/$actualBundleId/e_sqlite3.dll"; Directory=$false; Expected=$true },
+        @{ Name='case_semantics'; Relative="BUNDLE-EXTRACT/REVAGENT-BRIDGE/$actualBundleId/E_SQLITE3.DLL"; Directory=$false; Expected=$true },
+        @{ Name='embedded_padding'; Relative='bundle-extract/revagent-bridge/abc=def'; Directory=$true; Expected=$false },
+        @{ Name='unicode_bundle_id'; Relative='bundle-extract/revagent-bridge/abcİ'; Directory=$true; Expected=$false },
+        @{ Name='unicode_root'; Relative="bundle-extract/revagent-brİdge/$actualBundleId"; Directory=$true; Expected=$false },
+        @{ Name='unicode_library'; Relative="bundle-extract/revagent-bridge/$actualBundleId/e_sqliteİ.dll"; Directory=$false; Expected=$false },
+        @{ Name='traversal'; Relative="bundle-extract/revagent-bridge/../$actualBundleId"; Directory=$true; Expected=$false },
+        @{ Name='wrong_root'; Relative="bundle-extract/foreign/$actualBundleId/e_sqlite3.dll"; Directory=$false; Expected=$false },
+        @{ Name='overlength'; Relative=('bundle-extract/revagent-bridge/'+('a'*128)+'='); Directory=$true; Expected=$false },
+        @{ Name='overpadding'; Relative='bundle-extract/revagent-bridge/abc==='; Directory=$true; Expected=$false },
+        @{ Name='non_dll'; Relative="bundle-extract/revagent-bridge/$actualBundleId/payload.json"; Directory=$false; Expected=$false }
+    )
+    $rows = foreach ($case in $cases) {
+        $actual = & (Get-Module RevAgent.BridgeInstall) {param($relative,$directory) Test-RevAgentBridgeOwnedStatePath -Relative $relative -Directory $directory} $case.Relative $case.Directory
+        if ([bool]$actual -ne [bool]$case.Expected) { throw "bundle_grammar_probe_failed:$($case.Name)" }
+        [ordered]@{name=$case.Name;expected=[bool]$case.Expected;actual=[bool]$actual}
+    }
+    [ordered]@{passed=$true;shell=$PSVersionTable.PSEdition;version=[string]$PSVersionTable.PSVersion;culture=$BundleGrammarCulture;actualBundleId=$actualBundleId;cases=@($rows)} | ConvertTo-Json -Depth 5 -Compress
+    return
+}
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -1115,7 +1149,7 @@ try {
     Write-Host 'Test BridgeOwned report guards preserve existing reports and affected roots'
     # Exercise the real signed-package/owned-inventory/dry-run path without
     # pretending this non-admin process owns SYSTEM/Administrators ACLs.
-    $actualBundleId='EvRJBzBTzkY8ChjFumZ_JPUkO+eiczg='
+    $actualBundleId='_bye7OuDW05BPw_IhGRjA7qrECW1Wuk='
     $actualBundleDirectory=Join-Path $realRunLayout.BundleExtractionRoot (Join-Path 'revagent-bridge' $actualBundleId)
     $actualBundleLibrary=Join-Path $actualBundleDirectory 'e_sqlite3.dll'
     [void][IO.Directory]::CreateDirectory($actualBundleDirectory)
@@ -1125,6 +1159,18 @@ try {
     $bundleShapeProbe={param([string]$Relative) Test-RevAgentBridgeOwnedStatePath -Relative $Relative -Directory $true}
     Assert-True (-not(& (Get-Module RevAgent.BridgeInstall) $bundleShapeProbe $overlongPaddedBundleRelative)) 'Padding must remain inside the existing 128-character total bundle-ID bound.'
     Assert-True (-not(& (Get-Module RevAgent.BridgeInstall) $bundleShapeProbe $triplePaddedBundleRelative)) 'Bundle IDs with more than two trailing padding characters must remain refused.'
+    $bundleGrammarShells=@(
+        @{name='WindowsPowerShell';path=(Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')},
+        @{name='PowerShell';path=(Get-Command pwsh -ErrorAction Stop).Source}
+    )
+    foreach($shell in $bundleGrammarShells){
+        foreach($culture in @('tr-TR','en-US')){
+            $probeOutput=@(& $shell.path -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath -RepoRoot $RepoRoot -BundleGrammarProbe -BundleGrammarCulture $culture 2>&1)
+            Assert-Equal $LASTEXITCODE 0 "The isolated $($shell.name) $culture bundle grammar probe must exit successfully. Output: $($probeOutput -join ' | ')"
+            $probeResult=$probeOutput[-1]|ConvertFrom-Json
+            Assert-True ($probeResult.passed -and $probeResult.culture -ceq $culture -and $probeResult.cases.Count -eq 12) "The isolated $($shell.name) $culture bundle grammar probe must pass all exact cases."
+        }
+    }
     $oldReader=& (Get-Module RevAgent.BridgeInstall) {Get-Item Function:Get-Acl -ErrorAction SilentlyContinue}
     $oldReaderBody=if($oldReader){$oldReader.ScriptBlock}else{$null}
     $cleanupAncestorPaths=@((Split-Path $realRunLayout.InstallRoot -Parent),(Split-Path $realRunLayout.StateRoot -Parent),$realRunLayout.AddinProgramFilesRoot,(Split-Path $realRunLayout.AddinProgramFilesRoot -Parent))
