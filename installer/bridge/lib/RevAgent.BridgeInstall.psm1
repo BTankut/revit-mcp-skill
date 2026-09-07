@@ -935,6 +935,51 @@ function Copy-RevAgentBridgeDirectoryContents {
     }
 }
 
+function Test-RevAgentBridgeIdenticalPayload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][string]$GuardRoot,
+        [string]$SourceDirectory = '',
+        [switch]$Directory
+    )
+
+    $destinationFull = Assert-RevAgentBridgeNoReparsePoint -Path $DestinationPath -GuardRoot $GuardRoot
+    $destinationState = Get-RevAgentBridgePathState -Path $destinationFull
+    if (-not $destinationState.Exists) { return $false }
+    if ([bool]$destinationState.IsDirectory -ne [bool]$Directory) {
+        throw "bridge_payload_destination_type_invalid: $destinationFull"
+    }
+
+    if ($Directory) {
+        if ([string]::IsNullOrWhiteSpace($SourceDirectory)) {
+            throw 'bridge_payload_source_directory_required'
+        }
+        # Inventory both trees without following links. Comparing directory as
+        # well as file rows prevents an extra empty destination directory from
+        # being mistaken for the signed package merely because the file-tree
+        # digest is unchanged.
+        $sourceRows = @(Get-RevAgentBridgeOwnedEntries -Root $SourceDirectory)
+        $destinationRows = @(Get-RevAgentBridgeOwnedEntries -Root $destinationFull)
+        foreach ($entry in $destinationRows) {
+            Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $entry.Path -ErrorAction Stop) -Directory $entry.Directory -Preflight
+        }
+        $sourceShape = @($sourceRows | ForEach-Object { "{0}`t{1}" -f $_.Relative, $_.Directory } | Sort-Object)
+        $destinationShape = @($destinationRows | ForEach-Object { "{0}`t{1}" -f $_.Relative, $_.Directory } | Sort-Object)
+        if (@(Compare-Object -ReferenceObject $sourceShape -DifferenceObject $destinationShape -CaseSensitive).Count -ne 0) {
+            return $false
+        }
+        $actualSha256 = Get-RevAgentBridgeDirectoryTreeSha256 -Path $destinationFull
+    }
+    else {
+        Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $destinationFull -ErrorAction Stop) -Directory $false -Preflight
+        $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $destinationFull).Hash
+    }
+
+    return [string]::Equals($actualSha256, $ExpectedSha256, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-RevAgentBridgeDirectoryTreeSha256 {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -1487,6 +1532,7 @@ Export-ModuleMember -Function `
     Get-RevAgentBridgeManagedCodexSectionNames, `
     Get-RevAgentBridgeLegacyRemovalTargets, `
     Copy-RevAgentBridgeDirectoryContents, `
+    Test-RevAgentBridgeIdenticalPayload, `
     Get-RevAgentBridgeDirectoryTreeSha256, `
     Get-RevAgentBridgeAnchorHashes, `
     Get-RevAgentBridgeTreeWipePlan, `

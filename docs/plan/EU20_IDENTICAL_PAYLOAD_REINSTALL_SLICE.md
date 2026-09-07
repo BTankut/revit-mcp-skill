@@ -15,8 +15,8 @@ The initial install report SHA-256 is
 `A54C874A0559C45A34A3B96BB1EC8CD66B10B7DA49F10C2B6914B1937E501022`.
 The failed idempotence report SHA-256 is
 `2C834C24D64BB1337C24C74D211F42FFEEDE6E9187BACDB5EA941A9A9C33E059`.
-Both are failed/incomplete EU-20 acceptance evidence where applicable; this
-correction does not close EU-20 or accept M6.
+The initial install and enrollment passed. The failed same-package rerun leaves
+EU-20 acceptance incomplete; this correction does not close EU-20 or accept M6.
 
 ## Scope and acceptance
 
@@ -51,3 +51,24 @@ milestone acceptance. Parent owns current lab cleanup and all machine work.
 Protected merge and its automatic production-key signing are covered by the
 operator's standing Autopilot authority recorded on 2026-09-07; no repeated
 merge/signing approval is required after the exact candidate is green.
+
+## Candidate evidence
+
+The portable focused fixture now holds the installed host, worker, add-in DLL,
+and deterministic manifest open through real Windows file handles that allow
+reads but deny writes and deletes. A same-package real installer invocation
+retains all four, preserves the existing device credential, and records each
+deploy/write step as `verified` with
+`retained_identical_signed_payload`. The predicate refuses untrusted
+ownership/ACLs and child reparse points, and does not classify changed bytes,
+extra files, or extra empty directories as identical.
+
+Focused Windows PowerShell 5.1 and PowerShell 7 runs passed. Raw logs are under
+`.orchestration/autopilot-v2/artifacts/EU-20/astra-b1/identical-payload-reinstall/`.
+These portable runs inject the existing disclosed ACL invoker and are not
+native elevated machine evidence. The parent retains ownership of the actual
+PETRUCCI same-package rerun, broad delivery gates, independent final review,
+protected checks, and acceptance decision.
+
+Actual: 36 active engineering minutes. Against the 45-75 minute forecast, the
+variance is -9 to -39 minutes. EU-20 acceptance remains incomplete.

@@ -696,6 +696,7 @@ try {
     $scratchRoots.Add($realRunTemp)
     $realRunLayoutArgs = Get-BridgeTempLayoutArgs -Root $realRunTemp
     $realRunReportPath = Join-Path $realRunTemp "external-report.json"
+    $identicalRerunReportPath = Join-Path $realRunTemp "identical-rerun-report.json"
 
     # Pre-create InstallRoot with its real, unmodified inherited ACL so its
     # "before" SDDL can be captured -- otherwise the installer's own
@@ -733,15 +734,18 @@ try {
     # to disclose icaclsInvokerInjected=true.
     $priorGlobalAclReader = & (Get-Module RevAgent.BridgeInstall) { Get-Item Function:Get-Acl -ErrorAction SilentlyContinue }
     $priorGlobalAclReaderBody = if ($priorGlobalAclReader) { $priorGlobalAclReader.ScriptBlock } else { $null }
+    $payloadLocks = [System.Collections.Generic.List[System.IDisposable]]::new()
     try {
         $freshRefusalRoot = New-TestScratchDirectory -Label 'fresh-identity-refusal'
         $scratchRoots.Add($freshRefusalRoot)
         $freshRefusalLayout = Get-BridgeTempLayoutArgs -Root $freshRefusalRoot
         $freshCredentialPath = (Get-RevAgentBridgeLayout @freshRefusalLayout).CredentialDirectory
         $distributionPaths = @()
+        $distributionRoots = @()
         foreach($argsForLayout in @($freshRefusalLayout,$realRunLayoutArgs)){
             $l=Get-RevAgentBridgeLayout @argsForLayout;$a=Get-RevAgentBridgeAddinLayout -Layout $l -RevitVersion '2022'
             $distributionPaths+=@($l.InstallRoot,$l.StateRoot,$a.AddinBinRoot,$a.ManifestPath)
+            $distributionRoots+=@($l.InstallRoot,$a.AddinBinRoot)
         }
         $fixtureAclReader = {
             param([string]$LiteralPath, $ErrorAction)
@@ -750,7 +754,10 @@ try {
                 $security.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
                 return $security
             }
-            if($LiteralPath -in $distributionPaths){
+            $underDistributionRoot = @($distributionRoots | Where-Object {
+                $LiteralPath.StartsWith($_.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)
+            }).Count -gt 0
+            if($LiteralPath -in $distributionPaths -or $underDistributionRoot){
                 $directory=(Get-Item -LiteralPath $LiteralPath -Force).PSIsContainer
                 $security=if($directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
                 $flags=if($directory){'OICI'}else{''}
@@ -784,15 +791,90 @@ try {
             -SkipRevitDetection `
             -SkipServiceStart `
             -IcaclsInvoker $mockIcaclsInvoker | Out-Null
+
+        # The real regression: keep read access while denying writes/deletes
+        # to the mapped host, worker and add-in payload files. A same-package
+        # re-run must hash and retain them without reaching Copy-Item.
+        $realRunAddinLayout = Get-RevAgentBridgeAddinLayout -Layout $realRunFixtureLayout -RevitVersion '2022'
+        $lockedPayloadPaths = @(
+            $realRunFixtureLayout.HostExecutablePath,
+            $realRunFixtureLayout.WorkerExecutablePath,
+            $realRunAddinLayout.AssemblyPath,
+            $realRunAddinLayout.ManifestPath
+        )
+        $payloadHashesBefore = @{}
+        foreach ($lockedPayloadPath in $lockedPayloadPaths) {
+            $payloadHashesBefore[$lockedPayloadPath] = (Get-FileHash -Algorithm SHA256 -LiteralPath $lockedPayloadPath).Hash
+            [void]$payloadLocks.Add([System.IO.FileStream]::new(
+                $lockedPayloadPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::Read))
+        }
+        $credentialHashBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $realRunFixtureLayout.DeviceCredentialPath).Hash
+
+        & (Join-Path $bridgeRoot "Install-RevAgentBridge.ps1") `
+            -PackageRoot $goodFixture.PackageRoot `
+            -TrustedKeysPath $goodFixture.TrustedKeysPath `
+            -InstallRoot $realRunLayoutArgs.InstallRoot `
+            -StateRoot $realRunLayoutArgs.StateRoot `
+            -AddinProgramFilesRoot $realRunLayoutArgs.AddinProgramFilesRoot `
+            -RevitAddinsRoot $realRunLayoutArgs.RevitAddinsRoot `
+            -GatewayHostName 'gateway.dpe.internal' `
+            -MachineReportPath $identicalRerunReportPath `
+            -SkipRevitDetection `
+            -SkipServiceStart `
+            -IcaclsInvoker $mockIcaclsInvoker | Out-Null
+
+        $identicalRerunReport = Get-Content -Raw -LiteralPath $identicalRerunReportPath | ConvertFrom-Json
+        Assert-Equal $identicalRerunReport.status 'success' 'A same-package re-run must succeed while host, worker, and add-in payload files deny writes.'
+        Assert-Equal $identicalRerunReport.install.alreadyEnrolled $true 'A same-package re-run must preserve and report the existing enrollment.'
+        foreach ($deployAction in @('deploy_host_executable','deploy_worker_payload','deploy_addin_payload','write_addin_manifest')) {
+            $deployStep = @($identicalRerunReport.steps | Where-Object { $_.action -ceq $deployAction })
+            Assert-Equal $deployStep.Count 1 "The same-package report must contain exactly one $deployAction step."
+            Assert-Equal $deployStep[0].status 'verified' "$deployAction must report verified retention, not a false applied/replaced claim."
+            Assert-Equal $deployStep[0].detail 'retained_identical_signed_payload' "$deployAction must identify why no copy was needed."
+        }
+        foreach ($lockedPayloadPath in $lockedPayloadPaths) {
+            Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $lockedPayloadPath).Hash $payloadHashesBefore[$lockedPayloadPath] 'A locked installed payload must remain byte-identical.'
+        }
+        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $realRunFixtureLayout.DeviceCredentialPath).Hash $credentialHashBefore 'Same-package reinstall must preserve the device credential bytes.'
+
+        # Exact inventory is part of the skip predicate. Extra or changed
+        # destination content must fall through to the existing guarded copy
+        # behavior rather than being reported as an identical retained payload.
+        $extraDirectory = Join-Path $realRunFixtureLayout.CurrentWorkerDirectory 'unexpected-empty-directory'
+        [void][System.IO.Directory]::CreateDirectory($extraDirectory)
+        Assert-True (-not (Test-RevAgentBridgeIdenticalPayload -SourceDirectory (Join-Path $goodFixture.PackageRoot 'worker') -DestinationPath $realRunFixtureLayout.CurrentWorkerDirectory -ExpectedSha256 (Get-RevAgentBridgeDirectoryTreeSha256 -Path (Join-Path $goodFixture.PackageRoot 'worker')) -GuardRoot $realRunFixtureLayout.InstallRoot -Directory)) 'An extra empty destination directory must prevent identical-payload retention.'
+        [System.IO.Directory]::Delete($extraDirectory)
+
+        $unexpectedLinkTarget = Join-Path $realRunTemp 'unexpected-link-target'
+        [void][System.IO.Directory]::CreateDirectory($unexpectedLinkTarget)
+        $unexpectedLink = Join-Path $realRunFixtureLayout.CurrentWorkerDirectory 'unexpected-link'
+        [void](New-Item -ItemType Junction -Path $unexpectedLink -Target $unexpectedLinkTarget)
+        Assert-ThrowsLike { Test-RevAgentBridgeIdenticalPayload -SourceDirectory (Join-Path $goodFixture.PackageRoot 'worker') -DestinationPath $realRunFixtureLayout.CurrentWorkerDirectory -ExpectedSha256 (Get-RevAgentBridgeDirectoryTreeSha256 -Path (Join-Path $goodFixture.PackageRoot 'worker')) -GuardRoot $realRunFixtureLayout.InstallRoot -Directory } 'bridge_owned_reparse_refused|bridge_path_contains_reparse_point' 'A destination child link must fail closed before identical-payload retention.'
+        [System.IO.Directory]::Delete($unexpectedLink)
+
+        $changedDestination = Join-Path $realRunFixtureLayout.InstallRoot 'changed-host-fixture.exe'
+        [System.IO.File]::WriteAllBytes($changedDestination, [byte[]]@(1,2,3,4))
+        Assert-True (-not (Test-RevAgentBridgeIdenticalPayload -DestinationPath $changedDestination -ExpectedSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe')).Hash -GuardRoot $realRunFixtureLayout.InstallRoot)) 'Changed destination bytes must prevent identical-payload retention.'
+        [System.IO.File]::Delete($changedDestination)
+
+        $untrustedOwnerDestination = Join-Path $realRunTemp 'untrusted-owner-host.exe'
+        [System.IO.File]::Copy((Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe'), $untrustedOwnerDestination)
+        Assert-ThrowsLike { Test-RevAgentBridgeIdenticalPayload -DestinationPath $untrustedOwnerDestination -ExpectedSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe')).Hash -GuardRoot $realRunTemp } 'bridge_distribution_untrusted_owner|bridge_distribution_unexpected_ace' 'An identical file without the trusted distribution owner/ACL must fail closed.'
+        [System.IO.File]::Delete($untrustedOwnerDestination)
     }
     catch {
-        if (Test-Path -LiteralPath $realRunReportPath) {
-            $failedRun = Get-Content -Raw -LiteralPath $realRunReportPath | ConvertFrom-Json
+        $failureReportPath = if (Test-Path -LiteralPath $identicalRerunReportPath) { $identicalRerunReportPath } else { $realRunReportPath }
+        if (Test-Path -LiteralPath $failureReportPath) {
+            $failedRun = Get-Content -Raw -LiteralPath $failureReportPath | ConvertFrom-Json
             Write-Host ($failedRun.steps[-1] | ConvertTo-Json -Compress -Depth 4)
         }
         throw
     }
     finally {
+        foreach ($payloadLock in $payloadLocks) { $payloadLock.Dispose() }
         Remove-Item -LiteralPath Function:\Get-Service -ErrorAction SilentlyContinue
         if ($null -ne $priorGlobalAclReaderBody) { Set-Item Function:global:Get-Acl -Value $priorGlobalAclReaderBody }
         else { & (Get-Module RevAgent.BridgeInstall) { Remove-Item Function:Get-Acl -ErrorAction SilentlyContinue } }
