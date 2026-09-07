@@ -193,4 +193,32 @@ describe("authenticated Bridge update heartbeat reporting", () => {
     } as unknown as RbpEnvelope)).rejects.toMatchObject({ code: "protocol" });
     await authority.close();
   });
+
+  it("rejects duplicate ids within one heartbeat before persistence or ack", async () => {
+    let persistenceCalls = 0;
+    const events: GatewayEventSink = {
+      kind: "capture",
+      async emit() { persistenceCalls += 1; return { ok: true as const, value: undefined }; },
+      async emitBatch() { persistenceCalls += 1; return { ok: true as const, value: undefined }; },
+      async flush() { return { ok: true as const, value: undefined }; },
+    };
+    const authority = new GatewayBridgeSessionAuthority(
+      createRestartableTestStore().store,
+      identity(),
+      { eventSink: events },
+    );
+    await authority.open();
+    const wire = channel();
+    const opened = await authority.openConnection({ deviceToken: DEVICE_TOKEN, binding: "wss", hello: hello(), channel: wire });
+    const first = report("staged", 90);
+    const duplicate = { ...report("applied", 91), report_id: first.report_id };
+
+    await expect(authority.receive(opened.connectionId, {
+      v: 1, type: "heartbeat", id: id(), ts: new Date().toISOString(),
+      payload: { bridge_version: "2.0.0", acks: [], sessions: [], update_reports: [first, duplicate] },
+    } as unknown as RbpEnvelope)).rejects.toMatchObject({ code: "protocol" });
+    expect(persistenceCalls).toBe(0);
+    expect(wire.frames.some((frame) => frame.type === "heartbeat_ack")).toBe(false);
+    await authority.close();
+  });
 });

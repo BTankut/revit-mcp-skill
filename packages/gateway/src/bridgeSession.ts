@@ -1308,7 +1308,7 @@ function parseBridgeUpdateReports(payload: unknown): readonly BridgeUpdateWireRe
       "manifest_digest", "state", "reason", "error", "occurred_at",
     ]) || typeof value.report_id !== "string" ||
       !BRIDGE_UPDATE_REPORT_ID_PATTERN.test(value.report_id) ||
-      !ids.add(value.report_id) || typeof value.device_id !== "string" ||
+      ids.has(value.report_id) || typeof value.device_id !== "string" ||
       !isBoundedText(value.from_version, 128, true) ||
       !isBoundedText(value.to_version, 128, true) ||
       !isSafeNonNegativeInteger(value.release_sequence) ||
@@ -1322,6 +1322,7 @@ function parseBridgeUpdateReports(payload: unknown): readonly BridgeUpdateWireRe
       !Number.isFinite(Date.parse(value.occurred_at))) {
       throw new GatewayRbpFault("protocol", "heartbeat update report is invalid", 400, 4400);
     }
+    ids.add(value.report_id);
     return value as unknown as BridgeUpdateWireReport;
   });
 }

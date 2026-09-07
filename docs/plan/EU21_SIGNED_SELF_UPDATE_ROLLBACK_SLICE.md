@@ -129,12 +129,21 @@ Final focused results:
 - Update/host/layout/heartbeat report tests: 26 passed, 0 failed.
 - Composed installer-to-rollback matrix: 1 passed, 0 failed.
 - Gateway TypeScript build: passed.
-- Authenticated Gateway update reporting: 3 passed, 0 failed.
+- Authenticated Gateway update reporting: 4 passed, 0 failed.
 
 Raw rework logs remain untracked under
 `artifacts/eu21-signed-self-update-rollback/`; the earlier failed logs are
 retained alongside the final green logs.
 
-Total actual from the first scope record through rework completion: 1.93 hours.
-Against the 6–8 hour forecast, variance is 4.07–6.07 hours under forecast.
+Total actual from the first scope record through final reconciliation: 2.18 hours.
+Against the 6–8 hour forecast, variance is 3.82–5.82 hours under forecast.
 Production signing material and M6 owner acceptance remain the only true gates.
+
+### Final reconciliation
+
+Review of `b07eb09d` found that `Set.add()` had been used as a boolean duplicate
+predicate even though it always returns the truthy Set. The Gateway parser now
+checks `ids.has(report_id)` before insertion. A same-heartbeat duplicate-id
+negative proves rejection occurs before event persistence and before a
+heartbeat acknowledgement. Valid batches and identical report replay across
+separate heartbeats retain their prior persistence and deduplication behavior.
