@@ -20,6 +20,30 @@ directories.
 
 True gates: production signing material and M6 acceptance.
 
+## Blocking-review scope amendment — 2026-09-07
+
+Final review of head `68edf583` blocked delivery on startup-failure rollback,
+full-digest rollout bucketing, manifest-digest sequence binding, authenticated
+Gateway reporting, and the lack of one composed matrix. The existing scope is
+therefore corrected to include the installer paths already changed above and
+this exact bounded Gateway reporting expansion:
+
+- `packages/gateway/src/bridgeSession.ts`
+- `packages/gateway/src/bridgeUpdateReporting.test.ts`
+- `packages/gateway/src/productionGatewayComposition.ts`
+- `packages/gateway/src/preProductionComposition.ts`
+
+The Gateway already owns the strict canonical `bridge.update` event schema and
+durable event sink. No report-ingress route exists. The rework uses the frozen
+RBP heartbeat and heartbeat-ack additive-property allowance: the authenticated
+connection supplies tenant, device, and session authority; Gateway validates a
+bounded optional `update_reports` collection, deduplicates through the canonical
+event sink, and returns report ids only after persistence. Old peers remain
+compatible. The mapping is explicit: `staged` becomes canonical `started`,
+`applied` becomes `applied`, `deferred` becomes `deferred`, `refused` and
+`quarantined` become `failed`, and `rollback` becomes `applied` with reason
+`crash_loop_rollback`.
+
 ## Local acceptance evidence
 
 Recorded 2026-09-07 in the isolated EU-21 worktree. The tests use generated
