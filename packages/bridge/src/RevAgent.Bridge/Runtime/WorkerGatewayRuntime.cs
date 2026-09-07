@@ -1,6 +1,7 @@
 using System.Reflection;
 using RevAgent.Bridge.AddinLoopback;
 using RevAgent.Bridge.Bootstrap;
+using RevAgent.Bridge.Bootstrap.Updates;
 using RevAgent.Bridge.Bootstrap.Configuration;
 using RevAgent.Bridge.Enrollment;
 using RevAgent.Bridge.Gateway.Connection;
@@ -145,7 +146,8 @@ internal sealed class WorkerGatewayRuntime : IAsyncDisposable
                         OnDispatchDiagnostic: onDispatchDiagnostic,
                         OnConnectionFailureObservation:
                             onConnectionFailureObservation,
-                        CarrierProducer: carrierProducer));
+                        CarrierProducer: carrierProducer,
+                        UpdateReports: new BridgeUpdateReportStore(layout)));
 
             return new WorkerGatewayRuntime(
                 coordinator,

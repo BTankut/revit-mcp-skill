@@ -13,7 +13,7 @@ internal static class WorkerExecutableResolver
         ArgumentNullException.ThrowIfNull(layout);
 
         string versionsRoot = Path.GetFullPath(layout.VersionsRoot);
-        string currentDirectory = Path.GetFullPath(layout.CurrentWorkerDirectory);
+        string currentDirectory = ResolveCurrentDirectory(layout, versionsRoot);
         if (!Path.IsPathFullyQualified(versionsRoot) ||
             !Path.IsPathFullyQualified(currentDirectory) ||
             !Directory.Exists(versionsRoot) ||
@@ -58,6 +58,22 @@ internal static class WorkerExecutableResolver
         }
 
         return new ResolvedWorkerExecutable(executablePath, resolvedDirectory);
+    }
+
+    private static string ResolveCurrentDirectory(
+        BridgeInstallLayout layout,
+        string versionsRoot)
+    {
+        if (!File.Exists(layout.CurrentVersionPointerPath))
+        {
+            return Path.GetFullPath(layout.CurrentWorkerDirectory);
+        }
+
+        string version = File.ReadAllText(layout.CurrentVersionPointerPath).Trim();
+        Update.UpdatePathPolicy.ValidateVersion(version);
+        string selected = Path.GetFullPath(Path.Combine(versionsRoot, version));
+        EnsureDescendant(versionsRoot, selected);
+        return selected;
     }
 
     private static void EnsureDescendant(string root, string candidate)

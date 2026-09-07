@@ -56,6 +56,7 @@ function Get-RevAgentBridgeLayout {
         ServiceDisplayName       = 'revAgent Bridge'
         ServiceAccount           = 'LocalSystem'
         HostExecutablePath       = Join-Path $installRootFull 'revagent-bridge-host.exe'
+        UpdateTrustedKeysPath    = Join-Path $installRootFull 'update-trusted-keys.json'
         VersionsRoot             = Join-Path $installRootFull 'versions'
         CurrentWorkerDirectory   = Join-Path (Join-Path $installRootFull 'versions') 'current'
         WorkerExecutablePath     = Join-Path (Join-Path (Join-Path $installRootFull 'versions') 'current') 'revagent-bridge.exe'
@@ -1250,7 +1251,7 @@ function Test-RevAgentBridgeOwnedStatePath {
     $nativeBundlePathIsAscii=[regex]::IsMatch($path,'^[\x00-\x7F]*$',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
     # Exact paths from BridgeInstallLayout; atomic residue suffixes from
     # AtomicCredentialFileWriter. Contents of credentials are never read.
-    if($Directory){return $path -eq '' -or $path -in @('credentials','reports','logs','logs/host','logs/worker','bundle-extract','artifact-spool') -or ($nativeBundlePathIsAscii -and [regex]::IsMatch($path,'^bundle-extract/(revagent-bridge|revagent-bridge-host)(/(?=[^/]{1,128}$)[A-Za-z0-9_+.-]+={0,2})?$',$nativeBundleRegexOptions))}
+    if($Directory){return $path -eq '' -or $path -in @('credentials','reports','logs','logs/host','logs/worker','bundle-extract','artifact-spool','updates','updates/staging','updates/addin-versions','updates/reports','updates/reports/pending') -or $path -match '^updates/(staging|addin-versions)/[A-Za-z0-9_.+-]{1,128}(/(bridge|addin))?$' -or ($nativeBundlePathIsAscii -and [regex]::IsMatch($path,'^bundle-extract/(revagent-bridge|revagent-bridge-host)(/(?=[^/]{1,128}$)[A-Za-z0-9_+.-]+={0,2})?$',$nativeBundleRegexOptions))}
     # RbpJournalWriterLease retains its lock file after Dispose; the carrier
     # spool producer similarly retains its empty startup root. Carrier children
     # remain unknown here and must not be swept as arbitrary state content.
@@ -1260,6 +1261,7 @@ function Test-RevAgentBridgeOwnedStatePath {
     if($path -match '^reports/(install|uninstall)-(latest|[0-9]{8}T[0-9]{6}Z)\.json$'){return $true}
     if($path -match '^reports/\.(install|uninstall)-(latest|[0-9]{8}T[0-9]{6}Z)\.json\.[a-f0-9]{32}\.tmp$'){return $true}
     # RollingJsonBridgeLog.BuildPath: prefix, yyyyMMdd, nonnegative sequence.
+    if($path -in @('updates/state.json','updates/current.version') -or $path -match '^updates/(state\.json|current\.version)\.tmp-[a-f0-9]{32}$' -or $path -match '^updates/reports/pending/[0-9a-f-]{36}\.json(\.tmp-[a-f0-9]{32})?$' -or $path -match '^updates/staging/[A-Za-z0-9_.+-]{1,128}/(bridge|addin)\.zip$' -or $path -match '^updates/(staging/[A-Za-z0-9_.+-]{1,128}/(bridge|addin)|addin-versions/[A-Za-z0-9_.+-]{1,128})/.+$'){return $true}
     if($path -match '^logs/(host/revagent-bridge-host|worker/worker)-([0-9]{8})-([0-9]{4,10})\.jsonl$'){
         $date=[datetime]::MinValue;$sequence=0
         return [datetime]::TryParseExact($Matches[2],'yyyyMMdd',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$date) -and [int]::TryParse($Matches[3],[ref]$sequence) -and $sequence -ge 0
@@ -1298,7 +1300,7 @@ function Get-RevAgentBridgeOwnedCleanupPlan {
     }
     $hostSource=Join-Path $package $content.host.relativePath;$workerSource=Join-Path $package $content.worker.relativeDirectory;$addinSource=Join-Path $package $content.addin.relativeDirectory
     if((Get-FileHash -LiteralPath $hostSource).Hash -ine $content.host.sha256 -or (Get-RevAgentBridgeDirectoryTreeSha256 -Path $workerSource) -ine $content.worker.sha256 -or (Get-RevAgentBridgeDirectoryTreeSha256 -Path $addinSource) -ine $content.addin.sha256){throw 'bridge_owned_package_tree_failed'}
-    $expected=@{};$expected[$Layout.HostExecutablePath]=(Get-FileHash -LiteralPath $hostSource).Hash
+    $expected=@{};$expected[$Layout.HostExecutablePath]=(Get-FileHash -LiteralPath $hostSource).Hash;$expected[$Layout.UpdateTrustedKeysPath]=(Get-FileHash -LiteralPath $TrustedKeysPath).Hash
     foreach($component in @(@{Source=$workerSource;Destination=$Layout.CurrentWorkerDirectory},@{Source=$addinSource;Destination=$addin.AddinBinRoot})){
         foreach($entry in @(Get-RevAgentBridgeOwnedEntries -Root $component.Source|Where-Object{-not $_.Directory})){$expected[(Join-Path $component.Destination $entry.Relative)]=(Get-FileHash -LiteralPath $entry.Path).Hash}
     }

@@ -26,5 +26,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\RevAgent.Bridge.Bootstrap\RevAgent.Bridge.Bootstrap.csproj" />
+    <ProjectReference Include="..\RevAgent.Contracts\RevAgent.Contracts.csproj" />
   </ItemGroup>
 </Project>

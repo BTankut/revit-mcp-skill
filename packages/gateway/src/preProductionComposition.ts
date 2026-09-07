@@ -325,6 +325,7 @@ export function createPreProductionLanTestComposition(
     identity,
     {
       clock: options.identityOptions.clock,
+      eventSink: options.events,
       ...(options.servingOwnership === undefined
         ? {}
         : { servingOwnership: options.servingOwnership }),

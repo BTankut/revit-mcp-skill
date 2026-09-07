@@ -1,6 +1,7 @@
 using RevAgent.Bridge.Bootstrap;
 using RevAgent.Bridge.Bootstrap.Control;
 using RevAgent.Bridge.Bootstrap.Logging;
+using RevAgent.Bridge.Host.Update;
 
 namespace RevAgent.Bridge.Host.Hosting;
 
@@ -9,6 +10,7 @@ internal enum WorkerStopReason
     ScmStop,
     ConsoleStop,
     HostShutdown,
+    UpdateApply,
 }
 
 internal sealed record WorkerExit(
@@ -41,6 +43,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     private readonly IWorkerProcessLauncher _launcher;
     private readonly IBridgeLog _log;
     private readonly TimeProvider _timeProvider;
+    private readonly CrashLoopRollbackController? _rollbackController;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly CancellationTokenSource _shutdownSource = new();
 
@@ -48,17 +51,20 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     private int _stopRequested;
     private int _started;
     private int _disposed;
+    private int _plannedUpdateRestart;
 
     internal WorkerSupervisor(
         BridgeInstallLayout layout,
         IWorkerProcessLauncher launcher,
         IBridgeLog log,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        CrashLoopRollbackController? rollbackController = null)
     {
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _launcher = launcher ?? throw new ArgumentNullException(nameof(launcher));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _rollbackController = rollbackController;
     }
 
     internal async Task StartAsync(CancellationToken cancellationToken)
@@ -72,12 +78,57 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            using var startSource =
-                CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    _shutdownSource.Token);
-            _current = await LaunchWorkerAsync(startSource.Token)
-                .ConfigureAwait(false);
+            int startupFailures = 0;
+            while (_current is null)
+            {
+                using var startSource =
+                    CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellationToken,
+                        _shutdownSource.Token);
+                try
+                {
+                    _current = await LaunchWorkerAsync(startSource.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (
+                    cancellationToken.IsCancellationRequested ||
+                    _shutdownSource.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    CrashRollbackResult? rollback =
+                        await RecordStartupFailureAsync(cancellationToken)
+                            .ConfigureAwait(false);
+                    if (rollback is null || rollback.CrashCount == 0)
+                    {
+                        throw;
+                    }
+
+                    startupFailures++;
+                    await LogStartupFailureAsync(
+                        exception,
+                        rollback,
+                        startupFailures,
+                        cancellationToken).ConfigureAwait(false);
+                    if (rollback.RolledBack)
+                    {
+                        startupFailures = 0;
+                    }
+                    else if (startupFailures >= CrashLoopRollbackController.CrashThreshold)
+                    {
+                        throw;
+                    }
+
+                    TimeSpan delay = RestartBackoff[
+                        Math.Min(
+                            Math.Max(startupFailures - 1, 0),
+                            RestartBackoff.Length - 1)];
+                    await Task.Delay(delay, _timeProvider, startSource.Token)
+                        .ConfigureAwait(false);
+                }
+            }
         }
         catch
         {
@@ -117,6 +168,28 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                 lastDiagnostics,
                 cancellationToken).ConfigureAwait(false);
 
+            bool plannedUpdateRestart =
+                Interlocked.Exchange(ref _plannedUpdateRestart, 0) != 0;
+            int restartLimit = plannedUpdateRestart
+                ? CrashLoopRollbackController.CrashThreshold
+                : MaxUnexpectedRestarts;
+            CrashRollbackResult? rollback =
+                plannedUpdateRestart || _rollbackController is null || lastExitCode == 0
+                ? null
+                : await _rollbackController.RecordUnexpectedExitAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            if (rollback?.RolledBack == true)
+            {
+                restartCount = 0;
+                await TryLogAsync(
+                    "error",
+                    "worker_version_rolled_back",
+                    $"Worker version '{rollback.QuarantinedVersion}' crashed " +
+                    $"{rollback.CrashCount} times; restored '{rollback.ActiveVersion}' " +
+                    "and quarantined the bad version.",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+
             await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -135,7 +208,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                         lastDiagnostics);
                 }
 
-                if (restartCount >= MaxUnexpectedRestarts)
+                if (restartCount >= restartLimit)
                 {
                     return new WorkerExit(
                         lastExitCode,
@@ -152,7 +225,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             bool launched = false;
             while (!launched)
             {
-                if (restartCount >= MaxUnexpectedRestarts)
+                if (restartCount >= restartLimit)
                 {
                     return new WorkerExit(
                         lastExitCode,
@@ -161,13 +234,14 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                         lastDiagnostics);
                 }
 
-                TimeSpan delay = RestartBackoff[restartCount];
+                TimeSpan delay = RestartBackoff[
+                    Math.Min(restartCount, RestartBackoff.Length - 1)];
                 restartCount++;
                 await TryLogAsync(
                     "warning",
                     "worker_restart_scheduled",
                     $"Worker exited with code {lastExitCode}; restart " +
-                    $"{restartCount}/{MaxUnexpectedRestarts} follows in " +
+                    $"{restartCount}/{restartLimit} follows in " +
                     $"{delay.TotalSeconds:0} seconds.",
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 using var restartSource =
@@ -228,17 +302,67 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                     ex is not OperationCanceledException ||
                     !cancellationToken.IsCancellationRequested)
                 {
+                    CrashRollbackResult? startupRollback =
+                        await RecordStartupFailureAsync(cancellationToken)
+                            .ConfigureAwait(false);
                     await TryLogAsync(
                         "error",
                         "worker_restart_failed",
-                        $"Worker restart {restartCount}/{MaxUnexpectedRestarts} failed.",
+                        $"Worker restart {restartCount}/{restartLimit} failed.",
                         ex,
                         cancellationToken).ConfigureAwait(false);
+                    if (startupRollback?.RolledBack == true)
+                    {
+                        restartCount = 0;
+                        restartLimit = MaxUnexpectedRestarts;
+                        await LogStartupFailureAsync(
+                            ex,
+                            startupRollback,
+                            startupRollback.CrashCount,
+                            cancellationToken).ConfigureAwait(false);
+                    }
                     lastExitCode = -1;
                     lastDiagnostics = EmptyDiagnostics;
                 }
             }
         }
+    }
+
+    private async Task<CrashRollbackResult?> RecordStartupFailureAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_rollbackController is null ||
+            cancellationToken.IsCancellationRequested ||
+            _shutdownSource.IsCancellationRequested)
+        {
+            return null;
+        }
+
+        return await _rollbackController.RecordUnexpectedExitAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async ValueTask LogStartupFailureAsync(
+        Exception exception,
+        CrashRollbackResult rollback,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        string message = rollback.RolledBack
+            ? $"Worker failed before READY {rollback.CrashCount} times; restored " +
+                $"'{rollback.ActiveVersion}' and quarantined " +
+                $"'{rollback.QuarantinedVersion}'."
+            : $"Worker failed before READY; version-aware crash count is " +
+                $"{rollback.CrashCount}/{CrashLoopRollbackController.CrashThreshold}, " +
+                $"startup attempt={attempt}.";
+        await TryLogAsync(
+            rollback.RolledBack ? "error" : "warning",
+            rollback.RolledBack
+                ? "worker_startup_version_rolled_back"
+                : "worker_startup_retry_scheduled",
+            message,
+            exception,
+            cancellationToken).ConfigureAwait(false);
     }
 
     internal async Task<WorkerStopResult> StopAsync(
@@ -335,6 +459,56 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                 }
 
                 return forced;
+            }
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    internal async Task RequestUpdateRestartAsync(
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        EnsureStarted();
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            RunningWorker worker = _current ??
+                throw new InvalidOperationException("No Bridge worker is running.");
+            Interlocked.Exchange(ref _plannedUpdateRestart, 1);
+            using var restartSource = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            restartSource.CancelAfter(GracefulStopTimeout);
+            try
+            {
+                var stop = new StopWorker(
+                    ControlProtocol.Version,
+                    worker.InstanceId,
+                    ToWireReason(WorkerStopReason.UpdateApply),
+                    _timeProvider.GetUtcNow()
+                        .Add(GracefulStopTimeout)
+                        .ToUnixTimeMilliseconds());
+                await worker.Connection.SendAsync(stop, restartSource.Token)
+                    .ConfigureAwait(false);
+                ControlMessage? acknowledgement = await worker.Connection
+                    .ReceiveAsync(restartSource.Token).ConfigureAwait(false);
+                if (acknowledgement is not WorkerStopping stopping ||
+                    stopping.WorkerPid != worker.Process.Id)
+                {
+                    throw new ControlProtocolException(
+                        "control_stopping_invalid",
+                        "Worker did not acknowledge the update restart.");
+                }
+
+                _ = await worker.Process.WaitForExitAsync(restartSource.Token)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                worker.Process.KillTree();
+                throw;
             }
         }
         finally
@@ -662,6 +836,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             WorkerStopReason.ScmStop => "scm_stop",
             WorkerStopReason.ConsoleStop => "console_stop",
             WorkerStopReason.HostShutdown => "host_shutdown",
+            WorkerStopReason.UpdateApply => "update_apply",
             _ => throw new ArgumentOutOfRangeException(nameof(reason)),
         };
 

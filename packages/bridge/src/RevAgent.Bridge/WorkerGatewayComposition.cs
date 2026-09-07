@@ -2,6 +2,7 @@ using System.Text.Json;
 using RevAgent.Bridge.AddinLoopback;
 using RevAgent.Bridge.Bootstrap;
 using RevAgent.Bridge.Bootstrap.Enrollment;
+using RevAgent.Bridge.Bootstrap.Updates;
 using RevAgent.Bridge.Enrollment;
 using RevAgent.Bridge.Gateway.Connection;
 using RevAgent.Bridge.Gateway.Dispatch;
@@ -50,7 +51,8 @@ internal sealed record WorkerGatewayServices(
     IRbpRecoveryCarrierObservationSink? RecoveryCarrierObservationSink = null,
     IRbpReconnectObservationSink? ReconnectObservationSink = null,
     Func<CancellationToken, Task>? BeforeRecoveryTerminalWrite = null,
-    Func<CancellationToken, Task>? AfterRecoveryCarrierWriteBeforeAck = null);
+    Func<CancellationToken, Task>? AfterRecoveryCarrierWriteBeforeAck = null,
+    BridgeUpdateReportStore? UpdateReports = null);
 
 /// <summary>
 /// Composes the production RBP data plane inside the worker host: the journal
@@ -205,7 +207,8 @@ internal static class WorkerGatewayComposition
                 beforeRecoveryTerminalWrite:
                     services.BeforeRecoveryTerminalWrite,
                 afterRecoveryCarrierWriteBeforeAck:
-                    services.AfterRecoveryCarrierWriteBeforeAck);
+                    services.AfterRecoveryCarrierWriteBeforeAck,
+                updateReports: services.UpdateReports);
         }
 
         if (services.Options.SessionRouteBindingAuthority is
@@ -279,7 +282,8 @@ internal static class WorkerGatewayComposition
             beforeRecoveryTerminalWrite:
                 services.BeforeRecoveryTerminalWrite,
             afterRecoveryCarrierWriteBeforeAck:
-                services.AfterRecoveryCarrierWriteBeforeAck);
+                services.AfterRecoveryCarrierWriteBeforeAck,
+            updateReports: services.UpdateReports);
     }
 
     /// <summary>

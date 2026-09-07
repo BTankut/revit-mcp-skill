@@ -76,6 +76,7 @@ import type {
   GatewayJsonValue,
 } from "./dispatch.js";
 import { gatewayUuidV7, isGatewayUuidV7 } from "./identifiers.js";
+import type { GatewayEventEnvelope, GatewayEventSink } from "./events.js";
 import type {
   GatewayBridgeEvidenceLookup,
   GatewayBridgeNoSendReceipt,
@@ -1270,6 +1271,72 @@ function nowIso(nowMs: number): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+const BRIDGE_UPDATE_REPORT_STATES = [
+  "staged", "applied", "deferred", "refused", "rollback", "quarantined",
+] as const;
+const BRIDGE_UPDATE_REPORT_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const BRIDGE_UPDATE_REPORT_TIME_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
+type BridgeUpdateReportState = (typeof BRIDGE_UPDATE_REPORT_STATES)[number];
+interface BridgeUpdateWireReport {
+  readonly report_id: string;
+  readonly device_id: string;
+  readonly from_version: string;
+  readonly to_version: string;
+  readonly release_sequence: number;
+  readonly manifest_digest: string;
+  readonly state: BridgeUpdateReportState;
+  readonly reason: string;
+  readonly error: string | null;
+  readonly occurred_at: string;
+}
+
+function parseBridgeUpdateReports(payload: unknown): readonly BridgeUpdateWireReport[] {
+  if (!isRecord(payload) || payload.update_reports === undefined) return [];
+  const raw = payload.update_reports;
+  if (!Array.isArray(raw) || raw.length > 16 ||
+      Buffer.byteLength(JSON.stringify(raw), "utf8") > 64 * 1024) {
+    throw new GatewayRbpFault("protocol", "heartbeat update_reports exceed bounded limits", 400, 4400);
+  }
+  const ids = new Set<string>();
+  return raw.map((value) => {
+    if (!isRecord(value) || !hasExactKeys(value, [
+      "report_id", "device_id", "from_version", "to_version", "release_sequence",
+      "manifest_digest", "state", "reason", "error", "occurred_at",
+    ]) || typeof value.report_id !== "string" ||
+      !BRIDGE_UPDATE_REPORT_ID_PATTERN.test(value.report_id) ||
+      ids.has(value.report_id) || typeof value.device_id !== "string" ||
+      !isBoundedText(value.from_version, 128, true) ||
+      !isBoundedText(value.to_version, 128, true) ||
+      !isSafeNonNegativeInteger(value.release_sequence) ||
+      typeof value.manifest_digest !== "string" || !DIGEST_PATTERN.test(value.manifest_digest) ||
+      typeof value.state !== "string" ||
+      !BRIDGE_UPDATE_REPORT_STATES.includes(value.state as BridgeUpdateReportState) ||
+      !isBoundedText(value.reason, 512, false) ||
+      !(value.error === null || isBoundedText(value.error, 2_048, true)) ||
+      typeof value.occurred_at !== "string" ||
+      !BRIDGE_UPDATE_REPORT_TIME_PATTERN.test(value.occurred_at) ||
+      !Number.isFinite(Date.parse(value.occurred_at))) {
+      throw new GatewayRbpFault("protocol", "heartbeat update report is invalid", 400, 4400);
+    }
+    ids.add(value.report_id);
+    return value as unknown as BridgeUpdateWireReport;
+  });
+}
+
+function isBoundedText(value: unknown, maximum: number, allowEmpty: boolean): value is string {
+  return typeof value === "string" && value.length <= maximum &&
+    (allowEmpty || value.length > 0) && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function canonicalUpdateStatus(state: BridgeUpdateReportState): "started" | "applied" | "failed" | "deferred" {
+  if (state === "staged") return "started";
+  if (state === "deferred") return "deferred";
+  if (state === "refused" || state === "quarantined") return "failed";
+  return "applied";
 }
 
 function asProductionIdentityAuthority(
@@ -4944,6 +5011,7 @@ export class GatewayBridgeSessionAuthority implements GatewayDurableBridgeEviden
   readonly #seatSessions = new Map<string, Set<string>>();
   readonly #sessionRepository: SessionAggregateRepository;
   readonly #resourceAuthority: GatewayResourceAuthority | undefined;
+  readonly #eventSink: GatewayEventSink | undefined;
   readonly #servingOwnership: GatewayServingOwnership | null;
   readonly #compositionProtocolStore: GatewayProtocolStore;
   readonly #privateObjectStore: OwnedPrivateObjectStorePort | null;
@@ -4981,6 +5049,8 @@ export class GatewayBridgeSessionAuthority implements GatewayDurableBridgeEviden
       readonly seatReassignmentCloseDrainTimeoutMs?: number;
       /** Optional until a composition has proved one shared store/object store. */
       readonly resourceAuthority?: GatewayResourceAuthority;
+      /** Canonical O7 sink for authenticated Bridge lifecycle transitions. */
+      readonly eventSink?: GatewayEventSink;
       /** Exact composition-owned lease; structural ports never mint a profile. */
       readonly servingOwnership?: GatewayServingOwnership;
       /** Value-free diagnostic only; never participates in route authority. */
@@ -5024,6 +5094,7 @@ export class GatewayBridgeSessionAuthority implements GatewayDurableBridgeEviden
       (digest) => this.#preparedInboundBlobs.get(digest) ?? null,
     );
     this.#resourceAuthority = options.resourceAuthority;
+    this.#eventSink = options.eventSink;
     const carrierTailObserver = Object.getOwnPropertyDescriptor(
       options,
       TEST_RSID_CARRIER_RECEIVE_TAIL_OBSERVER,
@@ -8378,7 +8449,12 @@ export class GatewayBridgeSessionAuthority implements GatewayDurableBridgeEviden
         await this.#unregister(connection, envelope.payload, authorityTicket);
         return;
       case "heartbeat":
-        await this.#heartbeat(connection, envelope.payload.acks, authorityTicket);
+        await this.#heartbeat(
+          connection,
+          envelope.payload.acks,
+          parseBridgeUpdateReports(envelope.payload),
+          authorityTicket,
+        );
         return;
       case "result":
       case "error":
@@ -12252,6 +12328,7 @@ export class GatewayBridgeSessionAuthority implements GatewayDurableBridgeEviden
   async #heartbeat(
     connection: LiveConnection,
     acks: readonly { readonly rsid: string; readonly seq: number }[],
+    updateReports: readonly BridgeUpdateWireReport[],
     authorityTicket: TenantAuthorityTicket,
   ): Promise<void> {
     this.#assertAuthorityTicket(authorityTicket, connection);
@@ -12302,15 +12379,96 @@ export class GatewayBridgeSessionAuthority implements GatewayDurableBridgeEviden
       returned.push({ rsid: ack.rsid, seq: updated.sequence.lastRxSeq });
     }
     this.#assertAuthorityTicket(authorityTicket, connection);
+    const updateReportAcks = await this.#persistBridgeUpdateReports(
+      connection,
+      updateReports,
+      authorityTicket,
+    );
+    this.#assertAuthorityTicket(authorityTicket, connection);
     await connection.send(
       JSON.stringify({
         v: 1,
         type: "heartbeat_ack",
         id: gatewayUuidV7(this.#clock()),
         ts: nowIso(this.#clock()),
-        payload: { server_time: nowIso(this.#clock()), acks: returned },
+        payload: {
+          server_time: nowIso(this.#clock()),
+          acks: returned,
+          ...(updateReportAcks.length === 0
+            ? {}
+            : { update_report_acks: updateReportAcks }),
+        },
       } satisfies RbpEnvelope),
     );
+  }
+
+  async #persistBridgeUpdateReports(
+    connection: LiveConnection,
+    reports: readonly BridgeUpdateWireReport[],
+    authorityTicket: TenantAuthorityTicket,
+  ): Promise<readonly string[]> {
+    if (reports.length === 0) return [];
+    if (this.#eventSink === undefined) {
+      throw new GatewayRbpFault(
+        "unavailable",
+        "bridge update event sink is unavailable",
+        503,
+        1011,
+      );
+    }
+    this.#assertAuthorityTicket(authorityTicket, connection);
+    const tenantId = connection.auth.actor.tenantId;
+    const deviceId = connection.auth.actor.deviceId;
+    const events: GatewayEventEnvelope[] = reports.map((report) => {
+      if (report.device_id !== deviceId) {
+        throw new GatewayRbpFault(
+          "auth",
+          "bridge update report device does not match authenticated connection",
+          403,
+          4403,
+        );
+      }
+      const reason = report.state === "rollback"
+        ? "crash_loop_rollback"
+        : report.state === "quarantined"
+          ? "bad_version_quarantined"
+          : report.reason;
+      return Object.freeze({
+        schema: "revagent.event.v2" as const,
+        event_id: report.report_id,
+        event_type: "bridge.update" as const,
+        occurred_at: new Date(report.occurred_at).toISOString(),
+        recorded_at: new Date(report.occurred_at).toISOString(),
+        tenant_id: tenantId,
+        source: {
+          component: "revagent-bridge",
+          version: report.to_version || report.from_version || "unknown",
+          instance: deviceId,
+        },
+        actor: { type: "device" as const, device_id: deviceId },
+        seq: report.release_sequence,
+        payload: {
+          device_id: deviceId,
+          from_version: report.from_version || null,
+          to_version: report.to_version || null,
+          status: canonicalUpdateStatus(report.state),
+          reason,
+          error: report.error,
+          update_state: report.state,
+          manifest_digest: report.manifest_digest,
+        },
+      });
+    });
+    const persisted = await this.#eventSink.emitBatch(events);
+    if (!persisted.ok) {
+      throw new GatewayRbpFault(
+        "unavailable",
+        "bridge update events were not durably persisted",
+        503,
+        1011,
+      );
+    }
+    return reports.map((report) => report.report_id);
   }
 
   async #commitCarrierChunk(

@@ -128,6 +128,7 @@ $installSummary = [ordered]@{
     serviceAlreadyInstalled  = $false
     icaclsInvokerInjected    = ($null -ne $IcaclsInvoker)
     elevated                 = $isCurrentlyElevated
+    updateTrustedKeysSha256  = $null
     configurationDisposition = 'not_planned'
 }
 
@@ -289,6 +290,22 @@ try {
                 return $layout.HostExecutablePath
             })
     }
+    $trustedKeysSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $TrustedKeysPath).Hash
+    $trustedKeysPayloadIdentical = -not $isDryRun -and (Test-RevAgentBridgeIdenticalPayload `
+        -DestinationPath $layout.UpdateTrustedKeysPath `
+        -ExpectedSha256 $trustedKeysSha256 `
+        -GuardRoot $layout.InstallRoot)
+    if ($trustedKeysPayloadIdentical) {
+        [void]$steps.Add([pscustomobject][ordered]@{ target = $layout.UpdateTrustedKeysPath; action = 'deploy_update_trusted_keys'; status = 'verified'; detail = 'retained_identical_trusted_keys' })
+    }
+    else {
+        [void](Invoke-RevAgentBridgeGuardedMutation -Target $layout.UpdateTrustedKeysPath -MutationAction 'deploy_update_trusted_keys' -DryRun $isDryRun -Steps $steps -Apply {
+                [void](Assert-RevAgentBridgeNoReparsePoint -Path $layout.UpdateTrustedKeysPath -GuardRoot $layout.InstallRoot)
+                Copy-Item -LiteralPath $TrustedKeysPath -Destination $layout.UpdateTrustedKeysPath -Force
+                return $layout.UpdateTrustedKeysPath
+            }.GetNewClosure())
+    }
+    $installSummary.updateTrustedKeysSha256 = $trustedKeysSha256
     $workerPayloadIdentical = -not $isDryRun -and (Test-RevAgentBridgeIdenticalPayload `
         -SourceDirectory $workerSourceDirectory `
         -DestinationPath $layout.CurrentWorkerDirectory `

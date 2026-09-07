@@ -45,7 +45,10 @@ export async function composeProductionGateway(
     privateObjectStore: new FilesystemPrivateObjectStore(config.objectStore.root),
     profile: "production_private",
   });
-  const bridge = new GatewayBridgeSessionAuthority(ownership.protocolStore, m5.identity, { servingOwnership: ownership });
+  const bridge = new GatewayBridgeSessionAuthority(ownership.protocolStore, m5.identity, {
+    servingOwnership: ownership,
+    eventSink: m5.repository,
+  });
   const ingress = createProductionRbpIngressHost({ authority: bridge });
   const entitledDevice = async (tenantId: string, userId: string): Promise<string | null> => {
     const result = await m5.plane.entitledDeviceIds({ tenantId, principalUserId: userId, toolName: M2_NORTH_FIRST_SLICE_CALLABLE });

@@ -5,6 +5,8 @@ using RevAgent.Bridge.Host.Cli;
 using RevAgent.Bridge.Host.Hosting;
 using RevAgent.Bridge.Host.Install;
 using RevAgent.Bridge.Host.Platform;
+using RevAgent.Bridge.Host.Update;
+using RevAgent.Bridge.Bootstrap.Updates;
 using System.Reflection;
 
 namespace RevAgent.Bridge.Host;
@@ -58,10 +60,30 @@ internal static class Program
             var eventLog = new WindowsLifecycleEventLog();
             var services = new WindowsServiceControlManager();
             var runtimeState = new HostRuntimeState();
+            var updateState = new BridgeUpdateStateStore(layout);
+            var updateReports = new BridgeUpdateReportStore(layout);
+            var revitProcessProbe = new SystemRevitProcessProbe();
+            var pendingAddinApplier = new PendingAddinApplier(
+                layout,
+                updateState,
+                revitProcessProbe,
+                updateReports);
+            var rollbackController = new CrashLoopRollbackController(
+                layout,
+                updateState,
+                revitProcessProbe,
+                reports: updateReports);
             var supervisor = new WorkerSupervisor(
                 layout,
                 workerLauncher,
-                log);
+                log,
+                rollbackController: rollbackController);
+            var updatePollingService = new BridgeUpdatePollingService(
+                layout,
+                updateState,
+                supervisor,
+                log,
+                updateReports);
             var installer = new ServiceInstaller(
                 layout,
                 processPath,
@@ -72,7 +94,9 @@ internal static class Program
                 supervisor,
                 log,
                 eventLog,
-                runtimeState);
+                runtimeState,
+                pendingAddinApplier,
+                updatePollingService);
             var dispatcher = new HostCommandDispatcher(
                 layout,
                 installer,

@@ -488,6 +488,7 @@
         "dependencies": {
           "Microsoft.Extensions.Hosting.WindowsServices": "[8.0.1, )",
           "RevAgent.Bridge.Bootstrap": "[1.0.0, )",
+          "RevAgent.Contracts": "[1.0.0, )",
           "System.Diagnostics.EventLog": "[8.0.2, )"
         }
       },

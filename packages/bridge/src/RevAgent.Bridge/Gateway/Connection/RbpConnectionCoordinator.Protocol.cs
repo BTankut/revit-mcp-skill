@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text.Json;
+using RevAgent.Bridge.Bootstrap.Updates;
 using System.Text.RegularExpressions;
 using RevAgent.Bridge.Gateway.Protocol;
 using RevAgent.Bridge.Gateway.Storage;
@@ -51,7 +52,8 @@ internal sealed partial class RbpConnectionCoordinator
 
     private JsonElement CreateHeartbeatPayload(
         IReadOnlyList<BoundSession> sessions,
-        IReadOnlyList<RbpSessionAcknowledgement> acknowledgements)
+        IReadOnlyList<RbpSessionAcknowledgement> acknowledgements,
+        IReadOnlyList<BridgeUpdateReport> updateReports)
     {
         object[] ackRows = acknowledgements
             .OrderBy(item => item.Rsid, StringComparer.Ordinal)
@@ -71,13 +73,55 @@ internal sealed partial class RbpConnectionCoordinator
                 ["revit_status"] = item.Local.RevitStatus,
             })
             .ToArray();
-        return JsonSerializer.SerializeToElement(
-            new Dictionary<string, object?>
+        object[] updateRows = BridgeUpdateHeartbeatReports.ToWireRows(updateReports);
+        var payload = new Dictionary<string, object?>
+        {
+            ["bridge_version"] = _options.HelloProfile.BridgeVersion,
+            ["acks"] = ackRows,
+            ["sessions"] = sessionRows,
+        };
+        if (updateRows.Length > 0)
+        {
+            payload["update_reports"] = updateRows;
+        }
+
+        return JsonSerializer.SerializeToElement(payload);
+    }
+
+    private static IReadOnlyList<string> ParseUpdateReportAcknowledgements(
+        RbpEnvelope envelope)
+    {
+        if (!envelope.Payload.TryGetProperty(
+                "update_report_acks",
+                out JsonElement values))
+        {
+            return [];
+        }
+
+        if (values.ValueKind != JsonValueKind.Array ||
+            values.GetArrayLength() > BridgeUpdateReportStore.MaximumHeartbeatReports)
+        {
+            throw InvalidControl(
+                "heartbeat_ack update_report_acks must be a bounded array.");
+        }
+
+        var reportIds = new List<string>(values.GetArrayLength());
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (JsonElement value in values.EnumerateArray())
+        {
+            string reportId = value.ValueKind == JsonValueKind.String
+                ? value.GetString() ?? string.Empty
+                : string.Empty;
+            if (!Guid.TryParseExact(reportId, "D", out _) || !seen.Add(reportId))
             {
-                ["bridge_version"] = _options.HelloProfile.BridgeVersion,
-                ["acks"] = ackRows,
-                ["sessions"] = sessionRows,
-            });
+                throw InvalidControl(
+                    "heartbeat_ack update report ids must be unique UUIDs.");
+            }
+
+            reportIds.Add(reportId);
+        }
+
+        return reportIds;
     }
 
     private static IReadOnlyList<RbpSessionAcknowledgement>

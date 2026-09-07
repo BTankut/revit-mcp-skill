@@ -431,6 +431,19 @@ internal sealed partial class RbpConnectionCoordinator
                 .ConfigureAwait(false);
         if (!loaded.Started) return;
         IReadOnlyList<RbpSessionAcknowledgement> acknowledgements = loaded.Value;
+        IReadOnlyList<RevAgent.Bridge.Bootstrap.Updates.BridgeUpdateReport>
+            updateReports = [];
+        if (_updateReports is not null)
+        {
+            CurrentOperationResult<IReadOnlyList<
+                RevAgent.Bridge.Bootstrap.Updates.BridgeUpdateReport>> reports =
+                await TryRunCurrentOperationAsync(
+                        context,
+                        () => _updateReports.ReadPendingAsync(context.Token))
+                    .ConfigureAwait(false);
+            if (!reports.Started) return;
+            updateReports = BridgeUpdateHeartbeatReports.Bound(reports.Value);
+        }
         IReadOnlyList<string> tombstones =
             context.GetSentUnregisterRsids();
         var fence = new RbpHeartbeatFence(
@@ -440,7 +453,8 @@ internal sealed partial class RbpConnectionCoordinator
             tombstones);
         JsonElement payload = CreateHeartbeatPayload(
             sessions,
-            acknowledgements);
+            acknowledgements,
+            updateReports);
         using var deadlineCancellation =
             CancellationTokenSource.CreateLinkedTokenSource(context.Token);
         try
@@ -450,7 +464,10 @@ internal sealed partial class RbpConnectionCoordinator
                 deadlineCancellation.Token);
             HeartbeatFlight? flight = null;
             if (!TryCommitCurrent(context, () =>
-                    flight = context.InstallHeartbeatFlight(fence, deadline)) ||
+                    flight = context.InstallHeartbeatFlight(
+                        fence,
+                        deadline,
+                        updateReports.Select(report => report.ReportId).ToArray())) ||
                 flight is null)
                 return;
 
@@ -640,6 +657,8 @@ internal sealed partial class RbpConnectionCoordinator
         {
             IReadOnlyList<RbpSessionAcknowledgement> acknowledgements =
                 ParseHeartbeatAcknowledgements(envelope);
+            IReadOnlyList<string> updateReportAcknowledgements =
+                ParseUpdateReportAcknowledgements(envelope);
             acknowledgements = GateRecoveryCarrierAcknowledgements(
                 context, acknowledgements);
             await ApplyRecoveryCarrierAcknowledgementsAsync(
@@ -743,6 +762,31 @@ internal sealed partial class RbpConnectionCoordinator
                         () => ScheduleActiveRecoveryTerminalsAsync(context))
                     .ConfigureAwait(false);
             if (!terminals.Started) return;
+
+            if (updateReportAcknowledgements.Count > 0)
+            {
+                if (_updateReports is null)
+                {
+                    throw new RbpCoordinatorException(
+                        RbpCoordinatorErrorCode.UnexpectedControl,
+                        "heartbeat_ack returned update reports when reporting is disabled.");
+                }
+
+                try
+                {
+                    BridgeUpdateHeartbeatReports.Acknowledge(
+                        _updateReports,
+                        flight.UpdateReportIds,
+                        updateReportAcknowledgements);
+                }
+                catch (InvalidDataException exception)
+                {
+                    throw new RbpCoordinatorException(
+                        RbpCoordinatorErrorCode.UnexpectedControl,
+                        exception.Message,
+                        exception);
+                }
+            }
 
             _ = TryCommitCurrent(context, () =>
                 context.CompleteHeartbeatFlight(flight));
