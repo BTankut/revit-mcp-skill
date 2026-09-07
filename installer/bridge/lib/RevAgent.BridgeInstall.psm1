@@ -795,6 +795,41 @@ function Assert-RevAgentBridgeDistributionSecurity {
     }
 }
 
+function Assert-RevAgentBridgeRetainedDistributionSecurity {
+    param(
+        [Parameter(Mandatory=$true)][Security.AccessControl.FileSystemSecurity]$Security,
+        [bool]$Directory
+    )
+
+    $sidType = [Security.Principal.SecurityIdentifier]
+    if ($Security.GetOwner($sidType).Value -notin @('S-1-5-18','S-1-5-32-544')) {
+        throw 'bridge_distribution_untrusted_owner'
+    }
+    $rules = @($Security.GetAccessRules($true,$true,$sidType))
+    if ($rules.Count -ne 3) { throw 'bridge_distribution_acl_verification_failed' }
+
+    # Set-RevAgentBridgeDistributionAcl produces one of two genuine shapes:
+    # protected explicit rules on the managed root/file itself, or the same
+    # three rules inherited by descendants created beneath a protected root.
+    # Retention accepts either complete shape, but never a mixed/unprotected
+    # explicit DACL, a missing principal, or any broader/additional ACE.
+    $expectedInherited = -not $Security.AreAccessRulesProtected
+    $flags = if ($Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' } else { [Security.AccessControl.InheritanceFlags]::None }
+    $rx = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544','S-1-5-32-545')) {
+        $matchingRules = @($rules | Where-Object { $_.IdentityReference.Value -ceq $sid })
+        $rights = if ($sid -eq 'S-1-5-32-545') { $rx } else { [Security.AccessControl.FileSystemRights]::FullControl }
+        if ($matchingRules.Count -ne 1 -or
+            $matchingRules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $matchingRules[0].IsInherited -ne $expectedInherited -or
+            $matchingRules[0].FileSystemRights -ne $rights -or
+            $matchingRules[0].InheritanceFlags -ne $flags -or
+            $matchingRules[0].PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw 'bridge_distribution_acl_verification_failed'
+        }
+    }
+}
+
 function Get-RevAgentBridgeManagedManifestAssembly {
     param([Parameter(Mandatory=$true)][string]$Path)
     if ((Get-Item -LiteralPath $Path).Length -gt 65536) { throw 'bridge_manifest_not_owned' }
@@ -963,7 +998,7 @@ function Test-RevAgentBridgeIdenticalPayload {
         $sourceRows = @(Get-RevAgentBridgeOwnedEntries -Root $SourceDirectory)
         $destinationRows = @(Get-RevAgentBridgeOwnedEntries -Root $destinationFull)
         foreach ($entry in $destinationRows) {
-            Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $entry.Path -ErrorAction Stop) -Directory $entry.Directory -Preflight
+            Assert-RevAgentBridgeRetainedDistributionSecurity -Security (Get-Acl -LiteralPath $entry.Path -ErrorAction Stop) -Directory $entry.Directory
         }
         $sourceShape = @($sourceRows | ForEach-Object { "{0}`t{1}" -f $_.Relative, $_.Directory } | Sort-Object)
         $destinationShape = @($destinationRows | ForEach-Object { "{0}`t{1}" -f $_.Relative, $_.Directory } | Sort-Object)
@@ -973,7 +1008,7 @@ function Test-RevAgentBridgeIdenticalPayload {
         $actualSha256 = Get-RevAgentBridgeDirectoryTreeSha256 -Path $destinationFull
     }
     else {
-        Assert-RevAgentBridgeDistributionSecurity -Security (Get-Acl -LiteralPath $destinationFull -ErrorAction Stop) -Directory $false -Preflight
+        Assert-RevAgentBridgeRetainedDistributionSecurity -Security (Get-Acl -LiteralPath $destinationFull -ErrorAction Stop) -Directory $false
         $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $destinationFull).Hash
     }
 

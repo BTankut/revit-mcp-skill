@@ -742,6 +742,7 @@ try {
         $freshCredentialPath = (Get-RevAgentBridgeLayout @freshRefusalLayout).CredentialDirectory
         $distributionPaths = @()
         $distributionRoots = @()
+        $retentionAclOverrides = @{}
         foreach($argsForLayout in @($freshRefusalLayout,$realRunLayoutArgs)){
             $l=Get-RevAgentBridgeLayout @argsForLayout;$a=Get-RevAgentBridgeAddinLayout -Layout $l -RevitVersion '2022'
             $distributionPaths+=@($l.InstallRoot,$l.StateRoot,$a.AddinBinRoot,$a.ManifestPath)
@@ -749,6 +750,9 @@ try {
         }
         $fixtureAclReader = {
             param([string]$LiteralPath, $ErrorAction)
+            if ($retentionAclOverrides.ContainsKey($LiteralPath)) {
+                return $retentionAclOverrides[$LiteralPath]
+            }
             if ($LiteralPath -in @($realRunFixtureLayout.CredentialDirectory, $freshCredentialPath)) {
                 $security = [Security.AccessControl.DirectorySecurity]::new()
                 $security.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
@@ -761,7 +765,9 @@ try {
                 $directory=(Get-Item -LiteralPath $LiteralPath -Force).PSIsContainer
                 $security=if($directory){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
                 $flags=if($directory){'OICI'}else{''}
-                $security.SetSecurityDescriptorSddlForm("O:BAG:BAD:P(A;$flags;FA;;;SY)(A;$flags;FA;;;BA)(A;$flags;0x1200a9;;;BU)")
+                $inheritance=if($LiteralPath -in $distributionPaths){'P'}else{'AI'}
+                $aceInheritance=if($LiteralPath -in $distributionPaths){$flags}else{$flags+'ID'}
+                $security.SetSecurityDescriptorSddlForm("O:BAG:BAD:$inheritance(A;$aceInheritance;FA;;;SY)(A;$aceInheritance;FA;;;BA)(A;$aceInheritance;0x1200a9;;;BU)")
                 return $security
             }
             if ($null -ne $priorGlobalAclReaderBody) { return & $priorGlobalAclReaderBody @PSBoundParameters }
@@ -864,6 +870,24 @@ try {
         [System.IO.File]::Copy((Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe'), $untrustedOwnerDestination)
         Assert-ThrowsLike { Test-RevAgentBridgeIdenticalPayload -DestinationPath $untrustedOwnerDestination -ExpectedSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe')).Hash -GuardRoot $realRunTemp } 'bridge_distribution_untrusted_owner|bridge_distribution_unexpected_ace' 'An identical file without the trusted distribution owner/ACL must fail closed.'
         [System.IO.File]::Delete($untrustedOwnerDestination)
+
+        $missingUsersDestination = Join-Path $realRunFixtureLayout.InstallRoot 'missing-users-rx-host.exe'
+        [System.IO.File]::Copy((Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe'), $missingUsersDestination)
+        $missingUsersSecurity = [Security.AccessControl.FileSecurity]::new()
+        $missingUsersSecurity.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')
+        $retentionAclOverrides[$missingUsersDestination] = $missingUsersSecurity
+        Assert-ThrowsLike { Test-RevAgentBridgeIdenticalPayload -DestinationPath $missingUsersDestination -ExpectedSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe')).Hash -GuardRoot $realRunFixtureLayout.InstallRoot } 'bridge_distribution_acl_verification_failed' 'An identical file missing Users RX must not be retained as verified.'
+        [void]$retentionAclOverrides.Remove($missingUsersDestination)
+        [System.IO.File]::Delete($missingUsersDestination)
+
+        $inheritedBroadDestination = Join-Path $realRunFixtureLayout.InstallRoot 'inherited-broad-host.exe'
+        [System.IO.File]::Copy((Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe'), $inheritedBroadDestination)
+        $inheritedBroadSecurity = [Security.AccessControl.FileSecurity]::new()
+        $inheritedBroadSecurity.SetSecurityDescriptorSddlForm('O:BAG:BAD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)(A;ID;FA;;;WD)')
+        $retentionAclOverrides[$inheritedBroadDestination] = $inheritedBroadSecurity
+        Assert-ThrowsLike { Test-RevAgentBridgeIdenticalPayload -DestinationPath $inheritedBroadDestination -ExpectedSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $goodFixture.PackageRoot 'host\revagent-bridge-host.exe')).Hash -GuardRoot $realRunFixtureLayout.InstallRoot } 'bridge_distribution_acl_verification_failed' 'An identical file with an inherited broad ACE must not be retained as verified.'
+        [void]$retentionAclOverrides.Remove($inheritedBroadDestination)
+        [System.IO.File]::Delete($inheritedBroadDestination)
     }
     catch {
         $failureReportPath = if (Test-Path -LiteralPath $identicalRerunReportPath) { $identicalRerunReportPath } else { $realRunReportPath }
