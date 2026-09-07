@@ -10,7 +10,14 @@ import { BoundedEu12EventWriter, type Eu12EventWriteReceipt } from "./eventPersi
 import { validateEu12EventEnvelope } from "./eventPersistence.js";
 import type { GatewayEventEnvelope } from "./events.js";
 import { PostgresEu12EventPersistence } from "./postgresEu12EventPersistence.js";
-import type { BridgeReleaseChannel, BridgeReleaseContract, ReleaseSignatureVerifier } from "./releaseChannelStore.js";
+import {
+  validateBridgeUpdateReleaseAuthority,
+  type BridgeReleaseChannel,
+  type BridgeReleaseContract,
+  type BridgeUpdateDeviceRingAssignment,
+  type BridgeUpdateReleaseAuthority,
+  type ReleaseSignatureVerifier,
+} from "./releaseChannelStore.js";
 import {
   RESULT_REFERENCE_DEFAULT_PAGE_BYTES,
   RESULT_REFERENCE_DEFAULT_TTL_MS,
@@ -129,10 +136,14 @@ function parseReferenceRow(row: {
 
 export interface PostgresEu12DataStoreOptions {
   readonly databaseUrl: string;
-  readonly publisherDatabaseUrl: string;
+  readonly publisherDatabaseUrl?: string;
   readonly objects: ResultObjectStore;
   readonly signatureVerifier: ReleaseSignatureVerifier;
   readonly pinnedSigningKeyIds: readonly string[];
+  readonly bridgeManifestVerifier?: (input: {
+    readonly manifest: JsonValue;
+    readonly signatureEnvelope: JsonValue;
+  }) => Readonly<{ readonly keyId: string; readonly contentSha256: string }>;
   readonly now?: () => number;
   readonly newRefId?: () => string;
 }
@@ -160,28 +171,36 @@ export type RetentionArchiveBoundary = "prepared" | "object_written" | "object_v
 export class PostgresEu12DataStore {
   public readonly kind = "postgres" as const;
   readonly #runtimePool: pg.Pool;
-  readonly #publisherPool: pg.Pool;
+  readonly #publisherPool: pg.Pool | null;
   readonly #events: PostgresEu12EventPersistence;
   readonly #objects: ResultObjectStore;
   readonly #signatureVerifier: ReleaseSignatureVerifier;
   readonly #pinnedSigningKeyIds: ReadonlySet<string>;
   readonly #now: () => number;
   readonly #newRefId: () => string;
+  readonly #bridgeManifestVerifier: PostgresEu12DataStoreOptions["bridgeManifestVerifier"];
 
   public constructor(options: PostgresEu12DataStoreOptions) {
     if (options.pinnedSigningKeyIds.length === 0) throw new Error("pinned signing key set is required");
     this.#runtimePool = new Pool({ connectionString: options.databaseUrl });
-    this.#publisherPool = new Pool({ connectionString: options.publisherDatabaseUrl });
+    this.#publisherPool = options.publisherDatabaseUrl === undefined
+      ? null
+      : new Pool({ connectionString: options.publisherDatabaseUrl });
     this.#events = new PostgresEu12EventPersistence(options.databaseUrl);
     this.#objects = options.objects;
     this.#signatureVerifier = options.signatureVerifier;
     this.#pinnedSigningKeyIds = new Set(options.pinnedSigningKeyIds);
     this.#now = options.now ?? Date.now;
     this.#newRefId = options.newRefId ?? randomUUID;
+    this.#bridgeManifestVerifier = options.bridgeManifestVerifier;
   }
 
   public async close(): Promise<void> {
-    await Promise.all([this.#runtimePool.end(), this.#publisherPool.end(), this.#events.close()]);
+    await Promise.all([
+      this.#runtimePool.end(),
+      ...(this.#publisherPool === null ? [] : [this.#publisherPool.end()]),
+      this.#events.close(),
+    ]);
   }
 
   /** The same typed O7 writer used by PostgresTenantStore. */
@@ -599,6 +618,7 @@ export class PostgresEu12DataStore {
     const artifact = await this.#objects.get({ key: release.artifactStorageKey });
     if (artifact === null || resultReferenceDigest(artifact) !== release.artifactSha256) throw new Error("bridge release artifact digest does not match stored artifact");
     const tenantIds = canonicalTenantTargets(input.tenantIds);
+    if (this.#publisherPool === null) throw new Error("release publisher authority is unavailable");
     const client = await this.#publisherPool.connect();
     try {
       await client.query("BEGIN");
@@ -627,12 +647,17 @@ export class PostgresEu12DataStore {
         tenantIds: authority.tenantIds,
       });
       if (!this.#signatureVerifier.verify({ signingKeyId: release.signingKeyId, canonicalManifest: manifest, signature: release.signature })) throw new Error("bridge release manifest signature is invalid");
+      const legacyManifest = JSON.parse(manifest) as JsonValue;
+      const legacyEnvelope = { legacySignature: release.signature } as unknown as JsonValue;
       const releaseWrite = await client.query<{ release_sequence: string | number; rollback_floor_sequence: string | number }>(
-        `INSERT INTO bridge_releases(id,version,channel,artifact_storage_key,artifact_sha256,signature,signing_key_id,min_supported_version,released_at,released_by,release_sequence,manifest_digest,rollback_floor_sequence)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9/1000.0),$10,$11,$5,$12)
+        `INSERT INTO bridge_releases(id,version,channel,artifact_storage_key,artifact_sha256,signature,signing_key_id,min_supported_version,released_at,released_by,release_sequence,manifest_digest,rollback_floor_sequence,
+           manifest_json,signature_envelope_json,bridge_storage_key,bridge_sha256,bridge_size_bytes,addin_storage_key,addin_sha256,addin_size_bytes,rollout_percent)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9/1000.0),$10,$11,$5,$12,$13::jsonb,$14::jsonb,$4,$5,$15,$16,$5,$15,0)
           ON CONFLICT (id) DO NOTHING
           RETURNING release_sequence,rollback_floor_sequence`,
-        [release.id, release.version, release.channel, release.artifactStorageKey, release.artifactSha256.slice("sha256:".length), release.signature, release.signingKeyId, release.minSupportedVersion, release.releasedAtMs, release.releasedBy, authority.releaseSequence, authority.releaseRollbackFloorSequence],
+        [release.id, release.version, release.channel, release.artifactStorageKey, release.artifactSha256.slice("sha256:".length), release.signature, release.signingKeyId, release.minSupportedVersion, release.releasedAtMs, release.releasedBy, authority.releaseSequence, authority.releaseRollbackFloorSequence,
+          JSON.stringify(legacyManifest), JSON.stringify(legacyEnvelope), artifact.byteLength,
+          `${release.artifactStorageKey}.legacy-addin-unavailable`],
       );
       const persistedRelease = releaseWrite.rows[0] ?? (await client.query<{ release_sequence: string | number; rollback_floor_sequence: string | number }>(
         "SELECT release_sequence,rollback_floor_sequence FROM bridge_releases WHERE id=$1", [release.id],
@@ -667,6 +692,210 @@ export class PostgresEu12DataStore {
     } catch (error) {
       await client.query("ROLLBACK"); throw error;
     } finally { client.release(); }
+  }
+
+  public async publishBridgeUpdateRelease(input: {
+    readonly release: BridgeUpdateReleaseAuthority;
+    readonly tenantIds: readonly string[];
+    readonly deviceRings?: readonly BridgeUpdateDeviceRingAssignment[];
+  }): Promise<DurableReleaseAuthority> {
+    const release = input.release;
+    validateBridgeUpdateReleaseAuthority(release);
+    assertUuid(release.id, "release id");
+    if (this.#publisherPool === null || this.#bridgeManifestVerifier === undefined) {
+      throw new Error("Bridge update publisher authority is unavailable");
+    }
+    const verification = this.#bridgeManifestVerifier({
+      manifest: release.manifest,
+      signatureEnvelope: release.signatureEnvelope,
+    });
+    if (verification.keyId !== release.signingKeyId || verification.contentSha256 !== release.manifestDigest) {
+      throw new Error("Bridge update signature authority differs from release metadata");
+    }
+    const tenantIds = canonicalTenantTargets(input.tenantIds);
+    const deviceRings = [...(input.deviceRings ?? [])].sort((left, right) =>
+      left.tenantId.localeCompare(right.tenantId) || left.deviceId.localeCompare(right.deviceId));
+    const seenDevices = new Set<string>();
+    for (const assignment of deviceRings) {
+      assertUuid(assignment.tenantId, "ring tenant id");
+      assertUuid(assignment.deviceId, "ring device id");
+      if (!tenantIds.includes(assignment.tenantId) || !Number.isSafeInteger(assignment.ring) ||
+          assignment.ring < 0 || assignment.ring > 99 ||
+          !seenDevices.add(`${assignment.tenantId}/${assignment.deviceId}`)) {
+        throw new Error("Bridge update device-ring authority is invalid");
+      }
+    }
+    const manifestObject = JSON.parse(canonicalizeJson(release.manifest)) as JsonValue;
+    const envelopeObject = JSON.parse(canonicalizeJson(release.signatureEnvelope)) as JsonValue;
+    const signature = (release.signatureEnvelope as { readonly signature?: unknown }).signature;
+    if (typeof signature !== "string") throw new Error("Bridge update signature is unavailable");
+
+    const client = await this.#publisherPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query<{
+        version: string; channel: BridgeReleaseChannel; signing_key_id: string; min_supported_version: string;
+        released_at: Date; released_by: string; rollback_floor_sequence: string | number; rollout_percent: number;
+        manifest_json: JsonValue; signature_envelope_json: JsonValue; release_sequence: string | number;
+        manifest_digest: string; bridge_storage_key: string; bridge_sha256: string; bridge_size_bytes: string | number;
+        addin_storage_key: string; addin_sha256: string; addin_size_bytes: string | number;
+      }>(`SELECT version,channel,signing_key_id,min_supported_version,released_at,released_by,
+                 rollback_floor_sequence,rollout_percent,manifest_json,signature_envelope_json,release_sequence,manifest_digest,
+                 bridge_storage_key,bridge_sha256::text,bridge_size_bytes,
+                 addin_storage_key,addin_sha256::text,addin_size_bytes
+          FROM bridge_releases WHERE id=$1 FOR UPDATE`, [release.id]);
+      const priorRelease = existing.rows[0];
+      if (priorRelease !== undefined) {
+        const same = canonicalizeJson(priorRelease.manifest_json) === canonicalizeJson(manifestObject) &&
+          canonicalizeJson(priorRelease.signature_envelope_json) === canonicalizeJson(envelopeObject) &&
+          priorRelease.version === release.version && priorRelease.channel === release.channel &&
+          priorRelease.signing_key_id === release.signingKeyId && priorRelease.min_supported_version === release.minSupportedVersion &&
+          priorRelease.released_at.getTime() === release.releasedAtMs && priorRelease.released_by === release.releasedBy &&
+          Number(priorRelease.rollback_floor_sequence) === release.rollbackFloorSequence && priorRelease.rollout_percent === release.rolloutPercent &&
+          Number(priorRelease.release_sequence) === release.releaseSequence && priorRelease.manifest_digest === release.manifestDigest &&
+          priorRelease.bridge_storage_key === release.components.bridge.storageKey && priorRelease.bridge_sha256 === release.components.bridge.sha256 &&
+          Number(priorRelease.bridge_size_bytes) === release.components.bridge.sizeBytes &&
+          priorRelease.addin_storage_key === release.components.addin.storageKey && priorRelease.addin_sha256 === release.components.addin.sha256 &&
+          Number(priorRelease.addin_size_bytes) === release.components.addin.sizeBytes;
+        if (!same) throw new Error("Bridge update release identity is immutable");
+      }
+      const priorChannel = await client.query<{ current_release_id: string; channel_revision: number; rollback_floor_sequence: string | number }>(
+        "SELECT current_release_id::text,channel_revision,rollback_floor_sequence FROM release_channels WHERE channel=$1 FOR UPDATE",
+        [release.channel],
+      );
+      if (release.releaseSequence < Number(priorChannel.rows[0]?.rollback_floor_sequence ?? 0)) {
+        throw new Error("Bridge update release is below the channel rollback floor");
+      }
+      const knownTargets = await client.query<{ id: string }>("SELECT id::text FROM tenants WHERE id = ANY($1::uuid[])", [tenantIds]);
+      if (knownTargets.rowCount !== tenantIds.length) throw new Error("Bridge update target tenant is unavailable");
+      for (const assignment of deviceRings) {
+        const known = await client.query("SELECT 1 FROM devices WHERE tenant_id=$1 AND id=$2", [assignment.tenantId, assignment.deviceId]);
+        if (known.rowCount !== 1) throw new Error("Bridge update ring device is unavailable");
+      }
+      if (priorRelease === undefined) {
+        await client.query(
+          `INSERT INTO bridge_releases(
+             id,version,channel,artifact_storage_key,artifact_sha256,signature,signing_key_id,
+             min_supported_version,released_at,released_by,release_sequence,manifest_digest,
+             rollback_floor_sequence,manifest_json,signature_envelope_json,
+             bridge_storage_key,bridge_sha256,bridge_size_bytes,
+             addin_storage_key,addin_sha256,addin_size_bytes,rollout_percent)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9/1000.0),$10,$11,$12,$13,
+             $14::jsonb,$15::jsonb,$16,$17,$18,$19,$20,$21,$22)`,
+          [release.id, release.version, release.channel, release.components.bridge.storageKey,
+            release.components.bridge.sha256, signature, release.signingKeyId,
+            release.minSupportedVersion, release.releasedAtMs, release.releasedBy,
+            release.releaseSequence, release.manifestDigest, release.rollbackFloorSequence,
+            JSON.stringify(manifestObject), JSON.stringify(envelopeObject),
+            release.components.bridge.storageKey, release.components.bridge.sha256,
+            release.components.bridge.sizeBytes, release.components.addin.storageKey,
+            release.components.addin.sha256, release.components.addin.sizeBytes,
+            release.rolloutPercent],
+        );
+      }
+      const idempotentChannel = priorChannel.rows[0]?.current_release_id === release.id;
+      if (!idempotentChannel) {
+        await client.query(
+          `INSERT INTO release_channels(channel,current_release_id,staged_rollout,channel_revision,rollback_floor_sequence)
+           VALUES($1,$2,$3::jsonb,1,$4)
+           ON CONFLICT (channel) DO UPDATE SET current_release_id=EXCLUDED.current_release_id,
+             staged_rollout=EXCLUDED.staged_rollout`,
+          [release.channel, release.id, JSON.stringify({ tenantIds, revision: (priorChannel.rows[0]?.channel_revision ?? 0) + 1 }), release.rollbackFloorSequence],
+        );
+      }
+      const channel = await client.query<{ channel_revision: number; rollback_floor_sequence: string | number }>(
+        "SELECT channel_revision,rollback_floor_sequence FROM release_channels WHERE channel=$1", [release.channel]);
+      const channelAuthority = channel.rows[0];
+      if (channelAuthority === undefined) throw new Error("Bridge update channel authority was not persisted");
+      if (!idempotentChannel) {
+        await client.query("DELETE FROM release_channel_targets WHERE channel=$1", [release.channel]);
+        await client.query("DELETE FROM bridge_release_device_rings WHERE channel=$1", [release.channel]);
+        for (const tenantId of tenantIds) {
+          await client.query("INSERT INTO release_channel_targets(channel,tenant_id,rollout_revision) VALUES($1,$2,$3)", [release.channel, tenantId, channelAuthority.channel_revision]);
+        }
+        for (const assignment of deviceRings) {
+          await client.query("INSERT INTO bridge_release_device_rings(channel,tenant_id,device_id,ring,rollout_revision) VALUES($1,$2,$3,$4,$5)",
+            [release.channel, assignment.tenantId, assignment.deviceId, assignment.ring, channelAuthority.channel_revision]);
+        }
+      }
+      const persistedTargets = await client.query<{ tenant_id: string }>(
+        "SELECT tenant_id::text FROM release_channel_targets WHERE channel=$1 ORDER BY tenant_id", [release.channel]);
+      if (persistedTargets.rows.map((row) => row.tenant_id).join("\0") !== tenantIds.join("\0")) {
+        throw new Error("Bridge update tenant target authority differs from import");
+      }
+      const persistedRings = await client.query<{ tenant_id: string; device_id: string; ring: number }>(
+        "SELECT tenant_id::text,device_id::text,ring FROM bridge_release_device_rings WHERE channel=$1 ORDER BY tenant_id,device_id", [release.channel]);
+      const comparableRings = persistedRings.rows.map((row) => ({ tenantId: row.tenant_id, deviceId: row.device_id, ring: row.ring }));
+      if (canonicalizeJson(comparableRings as unknown as JsonValue) !== canonicalizeJson(deviceRings as unknown as JsonValue)) {
+        throw new Error("Bridge update device-ring authority differs from import");
+      }
+      await client.query("COMMIT");
+      return Object.freeze({
+        releaseSequence: release.releaseSequence,
+        releaseRollbackFloorSequence: release.rollbackFloorSequence,
+        channelRevision: channelAuthority.channel_revision,
+        channelRollbackFloorSequence: Number(channelAuthority.rollback_floor_sequence),
+        tenantIds,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async readBridgeUpdateForDevice(input: { readonly tenantId: string; readonly deviceId: string }): Promise<Readonly<{
+    readonly release: BridgeUpdateReleaseAuthority;
+    readonly deviceRing: number;
+  }> | null> {
+    assertUuid(input.deviceId, "device id");
+    return await this.#tenantTransaction(input.tenantId, async (client) => {
+      const result = await client.query<{
+        id: string; version: string; channel: BridgeReleaseChannel; release_sequence: string | number;
+        rollback_floor_sequence: string | number; manifest_json: JsonValue; signature_envelope_json: JsonValue;
+        manifest_digest: string; signing_key_id: string; rollout_percent: number; min_supported_version: string;
+        released_at: Date; released_by: string; bridge_storage_key: string; bridge_sha256: string;
+        bridge_size_bytes: string | number; addin_storage_key: string; addin_sha256: string;
+        addin_size_bytes: string | number; ring: number | null;
+      }>(`SELECT release.id::text,release.version,release.channel,release.release_sequence,
+                  release.rollback_floor_sequence,release.manifest_json,release.signature_envelope_json,
+                  release.manifest_digest::text,release.signing_key_id,release.rollout_percent,
+                  release.min_supported_version,release.released_at,release.released_by,
+                  release.bridge_storage_key,release.bridge_sha256::text,release.bridge_size_bytes,
+                  release.addin_storage_key,release.addin_sha256::text,release.addin_size_bytes,ring.ring
+           FROM release_channel_targets target
+           JOIN release_channels channel ON channel.channel=target.channel
+           JOIN bridge_releases release ON release.id=channel.current_release_id
+           LEFT JOIN bridge_release_device_rings ring ON ring.channel=target.channel AND
+             ring.tenant_id=target.tenant_id AND ring.device_id=$2 AND ring.rollout_revision=target.rollout_revision
+           WHERE target.tenant_id=$1 AND (release.channel='stable' OR ring.device_id IS NOT NULL)
+           ORDER BY CASE WHEN ring.device_id IS NOT NULL THEN 0 ELSE 1 END, release.channel
+           LIMIT 1`, [input.tenantId, input.deviceId]);
+      const row = result.rows[0];
+      if (row === undefined) return null;
+      const manifest = row.manifest_json as { readonly components?: readonly { readonly name?: string; readonly url?: string; readonly version?: string }[] };
+      const component = (name: "bridge" | "addin", storageKey: string, sha256: string, sizeBytes: string | number) => {
+        const signed = manifest.components?.find((candidate) => candidate.name === name);
+        if (signed?.url === undefined || signed.version === undefined) throw new Error("Bridge update manifest component is unavailable");
+        return Object.freeze({ name, version: signed.version, storageKey, sha256, sizeBytes: Number(sizeBytes), url: signed.url });
+      };
+      const release: BridgeUpdateReleaseAuthority = Object.freeze({
+        id: row.id, version: row.version, channel: row.channel,
+        releaseSequence: Number(row.release_sequence), rollbackFloorSequence: Number(row.rollback_floor_sequence),
+        manifest: row.manifest_json, signatureEnvelope: row.signature_envelope_json,
+        manifestDigest: row.manifest_digest, signingKeyId: row.signing_key_id,
+        components: Object.freeze({
+          bridge: component("bridge", row.bridge_storage_key, row.bridge_sha256, row.bridge_size_bytes),
+          addin: component("addin", row.addin_storage_key, row.addin_sha256, row.addin_size_bytes),
+        }),
+        rolloutPercent: row.rollout_percent, minSupportedVersion: row.min_supported_version,
+        releasedAtMs: row.released_at.getTime(), releasedBy: row.released_by,
+      });
+      validateBridgeUpdateReleaseAuthority(release);
+      const ordinary = (createHash("sha256").update(input.deviceId, "utf8").digest().readUInt32BE(0) % 99) + 1;
+      return Object.freeze({ release, deviceRing: row.ring ?? ordinary });
+    });
   }
 
   public async readReleaseForTenant(input: { readonly tenantId: string; readonly channel: BridgeReleaseChannel }): Promise<BridgeReleaseContract | null> {

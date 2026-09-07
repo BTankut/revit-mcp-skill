@@ -32,3 +32,63 @@ Hedef | Plan satırı | Kabul | Kapsam | Forecast
 - Real enrolled workstation and Revit-open/crash-loop drills.
 - Pilot/stable promotion and M6 owner acceptance.
 
+## Local source candidate checkpoint — 2026-09-08
+
+Status: locally green draft source candidate. Scope amendment: none.
+
+Implemented within the exact allowlist:
+
+- WP3 `.NET 8` signer with strict RSA private/public-key matching, exact
+  `bridge-manifest` detached projection, deterministic PKCS#1 RS256 output,
+  and create-new atomic envelope publication.
+- Deterministic source-free worker/add-in package builder with normalized ZIP
+  order/timestamps, exact `year/revAgentPlugin/...` replacement layout,
+  component size/hash binding, and Git/tool provenance.
+- Migration 011 and the existing EU12 release store extension for exact
+  manifest/envelope, two immutable component objects, sequence/floor/channel,
+  tenant targets, device ring assignments, idempotent replay, and transaction
+  rollback on publication failure.
+- Disjoint `OBJECT_STORE_ROOT/releases/bridge` create-only adapter with bounded
+  keys, link-safe ancestry, no-follow reads, and byte revalidation.
+- M5-authenticated manifest/artifact endpoint with server-derived tenant,
+  active device/seat enforcement, exact current-release recheck, uniform hidden
+  failures, no range/list/redirect surface, and byte-verified ZIP responses.
+- P3-T11 poller bearer/device/fingerprint claims on the manifest and same-origin
+  artifacts; cross-origin signed URLs retain token non-forwarding.
+- An inert-by-default `bridge-cd.yml`: generated-key validation is automatic;
+  production signing and Gateway import require separate booleans, typed
+  confirmations, runner labels, protected environments, and exact artifact
+  id/digest/repository/run/head bindings.
+
+Focused evidence:
+
+- `artifacts/eu21-p3t12-delivery/logs/bridge-build.log`: Bridge solution build,
+  zero warnings/errors.
+- `artifacts/eu21-p3t12-delivery/logs/signer-tests.log`: 4/4 signer tests.
+- `artifacts/eu21-p3t12-delivery/logs/bridge-update-tests.log`: 14/14 update
+  engine/composed tests, including generated-release consumption through a
+  real loopback TLS server and exact same-origin claims.
+- `artifacts/eu21-p3t12-delivery/logs/package-signer-parity.log`: 12 assertions;
+  signer/oracle canonical bytes, digest, fingerprint and deterministic RS256
+  parity; deterministic packages; private-key containment; frozen hashes.
+- `artifacts/eu21-p3t12-delivery/logs/gateway-delivery-tests.log`: 9/9 focused
+  signature/object/import/endpoint tests; Gateway lint and build logs are
+  adjacent.
+- `artifacts/eu21-p3t12-delivery/logs/postgres-eu12-delivery-restart.log`: 9/9
+  migrations/persistence tests against a fresh loopback-only PostgreSQL 17
+  fixture. The restart predicate closes/recreates the EU12 store and database
+  pools against the same running disposable PostgreSQL server; it is a Gateway
+  process/store restart proof, not a PostgreSQL server-restart claim.
+- `artifacts/eu21-p3t12-delivery/logs/workflow-action-pins.log` and
+  `workflow-yaml.log`: immutable action pins and three-job YAML parse.
+- `artifacts/eu21-p3t12-delivery/actual-source-release/`: generated-key
+  actual-source proof containing one 33,610,922-byte single-file worker ZIP
+  (`71517e1e4041548601aeeea4791cf39eafdfe2428ad21bad7f35f9dd3600479f`)
+  and one 2,188,126-byte Revit 2022 add-in ZIP
+  (`1231a593fb81baa3ddfb3e76f8757d4c90d07b9e73469810bf7146798be2fe2f`).
+
+Forecast was 2.5–3.5 development days (20–28 hours). Actual elapsed source
+execution from draft creation to this checkpoint was 1.0 hour (0.125 of an
+8-hour development day), a variance of -19 to -27 hours. Protected checks,
+review, merge, production signing/import, deployed delivery, lab drills, and
+M6 ownership remain excluded from both values.

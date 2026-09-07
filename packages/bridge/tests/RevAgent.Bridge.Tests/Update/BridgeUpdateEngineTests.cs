@@ -275,7 +275,9 @@ public sealed class BridgeUpdateEngineTests
         var source = new AuthenticatedSessionArtifactSource(
             http,
             principal,
-            manifestUri);
+            manifestUri,
+            "generated-device-token",
+            "sha256:" + new string('a', 64));
 
         BridgeUpdateRejectedException mismatch =
             await Assert.ThrowsAsync<BridgeUpdateRejectedException>(

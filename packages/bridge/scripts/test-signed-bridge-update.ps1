@@ -1,0 +1,116 @@
+[CmdletBinding()]
+param(
+    [string]$RepoRoot = '',
+    [string]$ArtifactsRoot = '',
+    [string]$DotnetPath = 'dotnet'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+if (-not $RepoRoot) { $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..')) }
+if (-not $ArtifactsRoot) { $ArtifactsRoot = Join-Path $RepoRoot 'artifacts\eu21-p3t12-delivery\package-test' }
+$ArtifactsRoot = [IO.Path]::GetFullPath($ArtifactsRoot)
+$allowedArtifactsParent = [IO.Path]::GetFullPath((Join-Path $RepoRoot 'artifacts\eu21-p3t12-delivery'))
+if (-not $ArtifactsRoot.StartsWith($allowedArtifactsParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Focused test artifacts must stay below artifacts/eu21-p3t12-delivery.'
+}
+if (Test-Path -LiteralPath $ArtifactsRoot) { Remove-Item -LiteralPath $ArtifactsRoot -Recurse -Force }
+[void](New-Item -ItemType Directory -Path $ArtifactsRoot)
+
+function Assert-Equal { param($Actual, $Expected, [string]$Message) if (-not [object]::Equals($Actual, $Expected)) { throw "$Message Actual='$Actual' Expected='$Expected'." } }
+function Assert-True { param([bool]$Condition, [string]$Message) if (-not $Condition) { throw $Message } }
+function XmlElement { param([string]$Name, [byte[]]$Value) return "<$Name>$([Convert]::ToBase64String($Value))</$Name>" }
+
+$rsa = [Security.Cryptography.RSA]::Create(2048)
+try {
+    $key = $rsa.ExportParameters($true)
+    $publicXml = '<RSAKeyValue>' + (XmlElement Modulus $key.Modulus) + (XmlElement Exponent $key.Exponent) + '</RSAKeyValue>'
+    $privateXml = '<RSAKeyValue>' + (XmlElement Modulus $key.Modulus) + (XmlElement Exponent $key.Exponent) +
+        (XmlElement P $key.P) + (XmlElement Q $key.Q) + (XmlElement DP $key.DP) + (XmlElement DQ $key.DQ) +
+        (XmlElement InverseQ $key.InverseQ) + (XmlElement D $key.D) + '</RSAKeyValue>'
+    $privatePath = Join-Path $ArtifactsRoot 'generated-private.xml'
+    $trustedPath = Join-Path $ArtifactsRoot 'generated-trusted.json'
+    [IO.File]::WriteAllText($privatePath, $privateXml, [Text.UTF8Encoding]::new($false))
+    Import-Module (Join-Path $RepoRoot 'installer\lib\RevAgent.DistributionIntegrity.psm1') -Force
+    $fingerprint = Get-RevAgentPublicKeyFingerprint -PublicKeyXml $publicXml
+    [ordered]@{ trustedKeys = [ordered]@{ 'generated-p3t12' = [ordered]@{
+        publicKeyXml = $publicXml; publicKeyFingerprint = $fingerprint; algorithm = 'RS256'
+    } } } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $trustedPath -Encoding utf8NoBOM
+
+    $preparedBridge = Join-Path $ArtifactsRoot 'prepared-bridge'
+    $preparedAddin = Join-Path $ArtifactsRoot 'prepared-addin\2022\revAgentPlugin'
+    [void](New-Item -ItemType Directory -Path $preparedBridge)
+    [void](New-Item -ItemType Directory -Path $preparedAddin)
+    [IO.File]::WriteAllBytes((Join-Path $preparedBridge 'revagent-bridge.exe'), [Text.Encoding]::UTF8.GetBytes('generated worker fixture'))
+    [IO.File]::WriteAllBytes((Join-Path $preparedAddin 'revAgentPlugin.dll'), [Text.Encoding]::UTF8.GetBytes('generated addin fixture'))
+    [IO.File]::WriteAllText((Join-Path $preparedAddin 'ignored.pdb'), 'must be excluded')
+
+    & $DotnetPath restore (Join-Path $RepoRoot 'packages\bridge\src\RevAgent.Bridge.ReleaseSigner\RevAgent.Bridge.ReleaseSigner.csproj') --locked-mode
+    if ($LASTEXITCODE -ne 0) { throw 'Signer locked restore failed.' }
+    $common = @{
+        ReleaseId = '30000000-0000-4000-8000-000000000001'; Version = '3.0.0'; ReleaseSequence = 42
+        Channel = 'pilot'; RolloutPercent = 100; MinSupportedVersion = '2.0.0'; Notes = 'generated-key parity fixture'
+        GatewayBaseUrl = 'https://gateway.example.test'; KeyId = 'generated-p3t12'; PrivateKeyPath = $privatePath
+        TrustedKeysPath = $trustedPath; CreatedAtUtc = '2026-09-07T12:34:56.0000000Z'
+        Repository = 'BTankut/revAgent'; HeadSha = ('a' * 40); HeadTree = ('b' * 40); RepoRoot = $RepoRoot
+        DotnetPath = $DotnetPath; PreparedBridgeDirectory = $preparedBridge; PreparedAddinDirectory = (Split-Path (Split-Path $preparedAddin))
+    }
+    $first = Join-Path $ArtifactsRoot 'release-a'
+    $second = Join-Path $ArtifactsRoot 'release-b'
+    & (Join-Path $PSScriptRoot 'build-signed-bridge-update.ps1') @common -OutputRoot $first | Out-Null
+    & (Join-Path $PSScriptRoot 'build-signed-bridge-update.ps1') @common -OutputRoot $second | Out-Null
+    Assert-Equal (Get-FileHash (Join-Path $first 'bridge.zip')).Hash (Get-FileHash (Join-Path $second 'bridge.zip')).Hash 'Bridge ZIP must be deterministic.'
+    Assert-Equal (Get-FileHash (Join-Path $first 'addin.zip')).Hash (Get-FileHash (Join-Path $second 'addin.zip')).Hash 'Add-in ZIP must be deterministic.'
+    Add-Type -AssemblyName System.IO.Compression
+    $addinArchive = [IO.Compression.ZipFile]::OpenRead((Join-Path $first 'addin.zip'))
+    try {
+        $entryNames = @($addinArchive.Entries.FullName)
+        Assert-True ($entryNames -contains '2022/revAgentPlugin/revAgentPlugin.dll') 'Add-in replacement layout is absent.'
+        Assert-True (-not ($entryNames | Where-Object { $_ -match '(?i)\.(pdb|cs|ps1|psm1)$' })) 'Source/debug material entered the add-in ZIP.'
+    }
+    finally { $addinArchive.Dispose() }
+
+    $manifest = Get-Content -LiteralPath (Join-Path $first 'bridge-manifest.json') -Raw | ConvertFrom-Json -AsHashtable -DateKind String
+    $signed = Get-Content -LiteralPath (Join-Path $first 'bridge-manifest.signature.json') -Raw | ConvertFrom-Json -AsHashtable -DateKind String
+    $oracle = [ordered]@{
+        schemaVersion = 1; app = 'revAgent'; signedObject = 'bridge-manifest'; algorithm = 'RS256'; keyId = 'generated-p3t12'
+        publicKeyFingerprint = $fingerprint; canonicalization = 'RFC8785-JCS-SHA256-v1'
+        contentSha256 = Get-RevAgentCanonicalJsonSha256 -Value $manifest
+        createdAtUtc = '2026-09-07T12:34:56.0000000Z'; signature = ''
+    }
+    $oraclePayload = Get-RevAgentSignaturePayloadCanonicalJson -SignatureEnvelope $oracle
+    $provider = [Security.Cryptography.RSACryptoServiceProvider]::new()
+    try {
+        $provider.FromXmlString($privateXml)
+        $oracle.signature = [Convert]::ToBase64String($provider.SignData([Text.Encoding]::UTF8.GetBytes($oraclePayload), 'SHA256'))
+    }
+    finally { $provider.Dispose() }
+    Assert-Equal $signed.contentSha256 $oracle.contentSha256 'Signer content digest differs from frozen oracle.'
+    Assert-Equal $signed.publicKeyFingerprint $oracle.publicKeyFingerprint 'Signer fingerprint differs from frozen oracle.'
+    Assert-Equal (Get-RevAgentSignaturePayloadCanonicalJson -SignatureEnvelope $signed) $oraclePayload 'Signer nine-field canonical bytes differ from frozen oracle.'
+    Assert-Equal $signed.signature $oracle.signature 'Signer RS256 signature differs from frozen oracle.'
+
+    $frozenWorkflowHash = (Get-FileHash -Algorithm SHA256 (Join-Path $RepoRoot '.github\workflows\signed-source-free-cd.yml')).Hash
+    $frozenModuleHash = (Get-FileHash -Algorithm SHA256 (Join-Path $RepoRoot 'installer\lib\RevAgent.DistributionIntegrity.psm1')).Hash
+    Assert-Equal $frozenWorkflowHash 'E1BD3A40D103606613114CB029B865023F323F4B12232C07AE6700AEA96FCB3E' 'Frozen workflow changed.'
+    Assert-Equal $frozenModuleHash 'DF8F31B60432CC26FD73345CEE143E90B4235BA2DE08779813DAEDBC8563282E' 'Frozen integrity module changed.'
+    $changed = @(& git -C $RepoRoot diff --name-only 4eeccd530639a8a8f5a3ebd408964009335ea108 --)
+    Assert-True (-not ($changed -contains '.github/workflows/signed-source-free-cd.yml')) 'Frozen workflow appears in changed paths.'
+    Assert-True (-not ($changed -contains 'installer/lib/RevAgent.DistributionIntegrity.psm1')) 'Frozen integrity module appears in changed paths.'
+    $privateText = Get-Content -LiteralPath $privatePath -Raw
+    foreach ($releaseRoot in @($first, $second)) {
+        foreach ($file in Get-ChildItem -LiteralPath $releaseRoot -File -Recurse) {
+            $text = if ($file.Extension -in @('.json', '.txt', '.md')) { Get-Content -LiteralPath $file.FullName -Raw } else { '' }
+            Assert-True (-not $text.Contains($privateText)) "Private key material entered release payload $($file.Name)."
+        }
+    }
+    [ordered]@{
+        success = $true; tests = 12; signerOracleParity = $true; deterministicPackages = $true
+        bridgeSha256 = (Get-FileHash (Join-Path $first 'bridge.zip')).Hash.ToLowerInvariant()
+        addinSha256 = (Get-FileHash (Join-Path $first 'addin.zip')).Hash.ToLowerInvariant()
+        frozenWorkflowSha256 = $frozenWorkflowHash; frozenIntegrityModuleSha256 = $frozenModuleHash
+    } | ConvertTo-Json -Compress
+}
+finally {
+    $rsa.Dispose()
+}

@@ -1,0 +1,234 @@
+name: Bridge signed delivery
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/bridge-cd.yml"
+      - "packages/bridge/**"
+      - "packages/gateway/**"
+      - "docs/plan/EU21_P3T12_SIGNED_DELIVERY_SLICE.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/bridge-cd.yml"
+      - "packages/bridge/**"
+      - "packages/gateway/**"
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Immutable UUID for this Bridge release
+        required: true
+        type: string
+      release_version:
+        description: SemVer release version
+        required: true
+        type: string
+      release_sequence:
+        description: Monotonic release sequence
+        required: true
+        type: number
+      channel:
+        description: Release channel
+        required: true
+        default: pilot
+        type: choice
+        options: [pilot, stable]
+      rollout_percent:
+        description: Signed rollout percentage
+        required: true
+        default: 0
+        type: number
+      min_supported_version:
+        description: Minimum supported Bridge version
+        required: true
+        type: string
+      tenant_ids:
+        description: Comma-separated exact tenant UUID targets
+        required: true
+        type: string
+      device_rings_json:
+        description: Exact JSON array of tenantId/deviceId/ring pilot assignments
+        required: true
+        default: "[]"
+        type: string
+      sign_release:
+        description: Allow the dedicated signer job to read the production key
+        required: true
+        default: false
+        type: boolean
+      sign_confirmation:
+        description: Type SIGN_BRIDGE_UPDATE to authorize production signing
+        required: false
+        type: string
+      publish_release:
+        description: Allow the Gateway-host import and channel transaction
+        required: true
+        default: false
+        type: boolean
+      publish_confirmation:
+        description: Type PUBLISH_BRIDGE_UPDATE to authorize production import
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  generated-key-validation:
+    name: Generated-key Bridge delivery validation
+    runs-on: [self-hosted, Windows, revagent-ci]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.14.1
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Build protocol and Gateway
+        run: |
+          npm run build:self --workspace @revagent/protocol
+          npm run build --workspace @revagent/gateway
+      - name: Run generated-key signer and deterministic package proof
+        shell: pwsh
+        run: |
+          ./packages/bridge/scripts/test-signed-bridge-update.ps1 -RepoRoot $PWD -ArtifactsRoot (Join-Path $PWD 'artifacts/eu21-p3t12-delivery/workflow')
+      - name: Run focused Gateway delivery tests
+        run: >-
+          npx vitest run
+          packages/gateway/src/bridgeManifestSignature.test.ts
+          packages/gateway/src/bridgeReleaseObjectStore.test.ts
+          packages/gateway/src/bridgeReleaseImportCli.test.ts
+          packages/gateway/src/bridgeUpdateEndpoint.test.ts
+
+  production-sign:
+    name: Dedicated Bridge build and production signing
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.sign_release == true &&
+      inputs.sign_confirmation == 'SIGN_BRIDGE_UPDATE'
+    needs: generated-key-validation
+    runs-on: [self-hosted, Windows, revagent-cd]
+    environment: revagent-release-signing
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+      - name: Locked restore
+        shell: pwsh
+        run: dotnet restore packages/bridge/RevAgent.Bridge.sln --locked-mode
+      - name: Build source-free release and sign detached manifest
+        id: build
+        shell: pwsh
+        env:
+          PRIVATE_KEY_PATH: ${{ secrets.BRIDGE_RELEASE_PRIVATE_KEY_PATH }}
+          TRUSTED_KEYS_PATH: ${{ vars.BRIDGE_RELEASE_TRUSTED_KEYS_PATH }}
+          SIGNING_KEY_ID: ${{ vars.BRIDGE_RELEASE_SIGNING_KEY_ID }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_SEQUENCE: ${{ inputs.release_sequence }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
+          MIN_SUPPORTED_VERSION: ${{ inputs.min_supported_version }}
+          GATEWAY_PUBLIC_URL: ${{ vars.REVAGENT_GATEWAY_PUBLIC_URL }}
+        run: |
+          if (-not (Test-Path -LiteralPath $env:PRIVATE_KEY_PATH -PathType Leaf)) { throw 'Production signing key path is unavailable.' }
+          if (-not (Test-Path -LiteralPath $env:TRUSTED_KEYS_PATH -PathType Leaf)) { throw 'Production trusted-key path is unavailable.' }
+          $tree = (git show -s --format=%T $env:GITHUB_SHA).Trim()
+          ./packages/bridge/scripts/build-signed-bridge-update.ps1 `
+            -OutputRoot (Join-Path $PWD 'artifacts/bridge-release') `
+            -ReleaseId $env:RELEASE_ID `
+            -Version $env:RELEASE_VERSION `
+            -ReleaseSequence ([long]$env:RELEASE_SEQUENCE) `
+            -Channel $env:RELEASE_CHANNEL `
+            -RolloutPercent ([int]$env:ROLLOUT_PERCENT) `
+            -MinSupportedVersion $env:MIN_SUPPORTED_VERSION `
+            -Notes 'revAgent Bridge signed delivery' `
+            -GatewayBaseUrl $env:GATEWAY_PUBLIC_URL `
+            -KeyId $env:SIGNING_KEY_ID `
+            -PrivateKeyPath $env:PRIVATE_KEY_PATH `
+            -TrustedKeysPath $env:TRUSTED_KEYS_PATH `
+            -CreatedAtUtc ([DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'")) `
+            -Repository $env:GITHUB_REPOSITORY `
+            -HeadSha $env:GITHUB_SHA `
+            -HeadTree $tree `
+            -RepoRoot $PWD
+      - name: Upload exact immutable signed release
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bridge-release-${{ inputs.release_id }}-${{ github.sha }}
+          path: artifacts/bridge-release/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  production-import:
+    name: Gateway-host immutable import
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.publish_release == true &&
+      inputs.publish_confirmation == 'PUBLISH_BRIDGE_UPDATE'
+    needs: production-sign
+    runs-on: [self-hosted, Linux, revagent-gateway-publish]
+    environment: revagent-production-publish
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.14.1
+          cache: npm
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.production-sign.outputs.artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          path: artifacts/import
+          merge-multiple: true
+          digest-mismatch: error
+      - run: npm ci --ignore-scripts
+      - name: Build and apply the pinned migration set
+        env:
+          DATABASE_URL: ${{ secrets.BRIDGE_RELEASE_PUBLISHER_DATABASE_URL }}
+        run: npm run migrate:up --workspace @revagent/gateway
+      - name: Import exact signed release and channel authority
+        env:
+          DATABASE_URL: ${{ secrets.BRIDGE_RELEASE_PUBLISHER_DATABASE_URL }}
+          OBJECT_STORE_ROOT: ${{ vars.OBJECT_STORE_ROOT }}
+          TRUSTED_KEYS_PATH: ${{ vars.BRIDGE_RELEASE_TRUSTED_KEYS_PATH }}
+          ARTIFACT_ID: ${{ needs.production-sign.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ needs.production-sign.outputs.artifact-digest }}
+          TENANT_IDS: ${{ inputs.tenant_ids }}
+          BRIDGE_RELEASE_DEVICE_RINGS_JSON: ${{ inputs.device_rings_json }}
+        run: >-
+          node packages/gateway/dist/bridgeReleaseImportCli.js
+          --publish true
+          --confirm PUBLISH_BRIDGE_UPDATE
+          --artifact-root artifacts/import
+          --artifact-id "$ARTIFACT_ID"
+          --artifact-digest "$ARTIFACT_DIGEST"
+          --repository "$GITHUB_REPOSITORY"
+          --head-sha "$GITHUB_SHA"
+          --object-store-root "$OBJECT_STORE_ROOT"
+          --trusted-keys "$TRUSTED_KEYS_PATH"
+          --tenant-ids "$TENANT_IDS"
+          --released-by github-actions

@@ -40,6 +40,64 @@ export interface ReleaseSignatureVerifier {
   verify(input: { readonly signingKeyId: string; readonly canonicalManifest: string; readonly signature: string }): boolean;
 }
 
+export type BridgeUpdateComponentName = "bridge" | "addin";
+
+export interface BridgeUpdateComponentAuthority {
+  readonly name: BridgeUpdateComponentName;
+  readonly version: string;
+  readonly storageKey: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+  readonly url: string;
+}
+
+export interface BridgeUpdateReleaseAuthority {
+  readonly id: string;
+  readonly channel: BridgeReleaseChannel;
+  readonly version: string;
+  readonly releaseSequence: number;
+  readonly rollbackFloorSequence: number;
+  readonly manifest: JsonValue;
+  readonly signatureEnvelope: JsonValue;
+  readonly manifestDigest: string;
+  readonly signingKeyId: string;
+  readonly components: Readonly<Record<BridgeUpdateComponentName, BridgeUpdateComponentAuthority>>;
+  readonly rolloutPercent: number;
+  readonly minSupportedVersion: string;
+  readonly releasedAtMs: number;
+  readonly releasedBy: string;
+}
+
+export interface BridgeUpdateDeviceRingAssignment {
+  readonly tenantId: string;
+  readonly deviceId: string;
+  readonly ring: number;
+}
+
+export function validateBridgeUpdateReleaseAuthority(release: BridgeUpdateReleaseAuthority): void {
+  if (!validId(release.id) || !validVersion(release.version) ||
+      release.channel !== "stable" && release.channel !== "pilot" ||
+      !Number.isSafeInteger(release.releaseSequence) || release.releaseSequence < 1 ||
+      !Number.isSafeInteger(release.rollbackFloorSequence) || release.rollbackFloorSequence < 0 ||
+      release.rollbackFloorSequence > release.releaseSequence ||
+      !/^[0-9a-f]{64}$/u.test(release.manifestDigest) || !validId(release.signingKeyId) ||
+      !Number.isSafeInteger(release.rolloutPercent) || release.rolloutPercent < 0 || release.rolloutPercent > 100 ||
+      !validVersion(release.minSupportedVersion) || !Number.isSafeInteger(release.releasedAtMs) ||
+      release.releasedAtMs < 1 || !validId(release.releasedBy)) {
+    throw new Error("bridge update release authority is invalid");
+  }
+  for (const name of ["bridge", "addin"] as const) {
+    const component = release.components[name];
+    if (component.name !== name || component.version !== release.version ||
+        !validArtifactKey(`releases/bridge/${component.storageKey}`) ||
+        !/^[0-9a-f]{64}$/u.test(component.sha256) ||
+        !Number.isSafeInteger(component.sizeBytes) || component.sizeBytes < 1 ||
+        !URL.canParse(component.url) || new URL(component.url).protocol !== "https:") {
+      throw new Error("bridge update component authority is invalid");
+    }
+  }
+}
+
 export interface ReleaseChannelStoreOptions {
   readonly objects: ResultObjectStore;
   readonly signatureVerifier: ReleaseSignatureVerifier;

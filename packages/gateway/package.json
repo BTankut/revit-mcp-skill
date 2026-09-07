@@ -12,6 +12,7 @@
     }
   },
   "scripts": {
+    "bridge-release-import": "node ./dist/bridgeReleaseImportCli.js",
     "prebuild": "npm run build:self --workspace @revagent/protocol",
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint src scripts",

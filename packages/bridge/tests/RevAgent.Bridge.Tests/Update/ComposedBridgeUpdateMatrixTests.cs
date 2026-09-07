@@ -1,7 +1,10 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
@@ -19,6 +22,79 @@ namespace RevAgent.Bridge.Tests.Update;
 
 public sealed class ComposedBridgeUpdateMatrixTests
 {
+    [Fact]
+    public async Task RealPollerConsumesGeneratedReleaseOverAuthenticatedLoopbackHttps()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string root = Path.Combine(Path.GetTempPath(), $"revagent-eu21-https-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            InstallerFixture installer = await PrepareInstallerFixtureAsync(root);
+            var layout = new BridgeInstallLayout(installer.InstallRoot, installer.StateRoot);
+            byte[] bridgeZip = Zip((BridgeInstallLayout.WorkerExecutableName, "https-worker"));
+            byte[] addinZip = Zip(("2022/revAgentPlugin/revAgentPlugin.dll", "https-addin"));
+            using RSA signingKey = ReadPrivateKey(installer.PrivateKeyPath);
+            await using var server = new LocalHttpsUpdateServer(bridgeZip, addinZip);
+            JObject manifest = Manifest(bridgeZip, addinZip, "2.0.0", 2, server.BaseUri);
+            JObject envelope = Envelope(signingKey, manifest);
+            server.SetManifest(manifest, envelope);
+            await server.StartAsync();
+
+            await using var log = new NullBridgeLog();
+            var state = new BridgeUpdateStateStore(layout);
+            var reports = new BridgeUpdateReportStore(layout);
+            var launcher = new ComposedWorkerLauncher();
+            var rollback = new CrashLoopRollbackController(layout, state, new MutableRevitProbe(), reports: reports);
+            await using var supervisor = new WorkerSupervisor(layout, launcher, log, rollbackController: rollback);
+            var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
+            handler.ServerCertificateCustomValidationCallback = (_, certificate, _, errors) =>
+                errors == SslPolicyErrors.None || certificate?.GetCertHashString() == server.CertificateThumbprint;
+            var poller = new BridgeUpdatePollingService(
+                layout, state, supervisor, log, reports,
+                httpClientFactory: () => new HttpClient(handler, disposeHandler: false),
+                revit: new MutableRevitProbe());
+            string machineFingerprint = "sha256:" + new string('d', 64);
+            string deviceId = "10000000-0000-4000-8000-000000000003";
+            var principal = new BridgeUpdatePrincipal(
+                BridgeUpdatePollingService.CreateTenantBinding(machineFingerprint, deviceId),
+                deviceId,
+                "30000000-0000-4000-8000-000000000001");
+            var context = new BridgeUpdatePollContext(
+                server.BaseUri,
+                principal,
+                "generated-https-device-token",
+                machineFingerprint,
+                BridgeUpdatePollingService.LoadTrustedKeys(installer.TrustedKeysPath),
+                "1.0.0");
+
+            BridgeUpdateResult result = await poller.CheckOnceAsync(context, CancellationToken.None);
+            Assert.Equal(BridgeUpdateDisposition.Applied, result.Disposition);
+            Assert.Equal("https-worker", await File.ReadAllTextAsync(
+                WorkerExecutableResolver.Resolve(layout).ExecutablePath));
+            Assert.Equal("https-addin", await File.ReadAllTextAsync(Path.Combine(
+                layout.AddinRoot, "2022", "revAgentPlugin", "revAgentPlugin.dll")));
+            Assert.Equal(3, server.Requests.Count);
+            Assert.All(server.Requests, request =>
+            {
+                Assert.Equal("Bearer generated-https-device-token", request.Authorization);
+                Assert.Equal(deviceId, request.DeviceId);
+                Assert.Equal(machineFingerprint, request.MachineFingerprint);
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     [Fact]
     public async Task InstallerPollerHostCrashRollbackAndGatewayReportMatrix()
     {
@@ -97,6 +173,7 @@ public sealed class ComposedBridgeUpdateMatrixTests
                 new Uri("wss://gateway.example.test/bridge/v1"),
                 principal,
                 "eu21-composed-bearer-token",
+                "sha256:" + new string('b', 64),
                 BridgeUpdatePollingService.LoadTrustedKeys(installer.TrustedKeysPath),
                 "1.0.0");
             SignatureVerificationResult directSignature =
@@ -173,6 +250,7 @@ public sealed class ComposedBridgeUpdateMatrixTests
                 ["applied", "deferred", "quarantined", "refused", "rollback", "staged"],
                 receipt.States.Order(StringComparer.Ordinal).ToArray());
             Assert.True(gateway.ManifestAuthorizationVerified);
+            Assert.True(gateway.ManifestDeviceClaimsVerified);
             Assert.True(gateway.ArtifactBearerWasAbsent);
 
             _ = await supervisor.StopAsync(
@@ -250,15 +328,16 @@ public sealed class ComposedBridgeUpdateMatrixTests
         byte[] bridge,
         byte[] addin,
         string version,
-        long sequence) => new()
+        long sequence,
+        Uri? artifactBase = null) => new()
         {
             ["schemaVersion"] = 1,
             ["channel"] = "stable",
             ["version"] = version,
             ["releaseSequence"] = sequence,
             ["components"] = new JArray(
-            Component("bridge", version, "https://objects.example.test/bridge.zip", bridge),
-            Component("addin", version, "https://objects.example.test/addin.zip", addin)),
+            Component("bridge", version, artifactBase is null ? "https://objects.example.test/bridge.zip" : new Uri(artifactBase, "/bridge/update/artifact/release/bridge").AbsoluteUri, bridge),
+            Component("addin", version, artifactBase is null ? "https://objects.example.test/addin.zip" : new Uri(artifactBase, "/bridge/update/artifact/release/addin").AbsoluteUri, addin)),
             ["rolloutPercent"] = 100,
             ["minSupportedVersion"] = "1.0.0",
             ["notes"] = "composed EU-21 matrix",
@@ -379,6 +458,7 @@ public sealed class ComposedBridgeUpdateMatrixTests
         }
 
         internal bool ManifestAuthorizationVerified { get; private set; }
+        internal bool ManifestDeviceClaimsVerified { get; private set; }
         internal bool ArtifactBearerWasAbsent { get; private set; }
 
         internal void SetResponse(JObject manifest, JObject envelope)
@@ -397,6 +477,11 @@ public sealed class ComposedBridgeUpdateMatrixTests
                 ManifestAuthorizationVerified |=
                     request.Headers.Authorization?.Scheme == "Bearer" &&
                     request.Headers.Authorization.Parameter == _expectedBearer;
+                ManifestDeviceClaimsVerified |=
+                    request.Headers.GetValues("x-revagent-device-id").Single() ==
+                        "10000000-0000-4000-8000-000000000003" &&
+                    request.Headers.GetValues("x-revagent-machine-fingerprint").Single() ==
+                        "sha256:" + new string('b', 64);
                 var wrapper = new JObject
                 {
                     ["manifest"] = _manifest.DeepClone(),
@@ -423,6 +508,130 @@ public sealed class ComposedBridgeUpdateMatrixTests
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json"),
             });
+    }
+
+    private sealed record HttpsRequest(
+        string Path,
+        string? Authorization,
+        string? DeviceId,
+        string? MachineFingerprint);
+
+    private sealed class LocalHttpsUpdateServer : IAsyncDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+        private readonly X509Certificate2 _certificate;
+        private readonly byte[] _bridge;
+        private readonly byte[] _addin;
+        private Task? _server;
+        private JObject? _manifest;
+        private JObject? _envelope;
+
+        internal LocalHttpsUpdateServer(byte[] bridge, byte[] addin)
+        {
+            _bridge = bridge;
+            _addin = addin;
+            using RSA rsa = RSA.Create(2048);
+            var request = new CertificateRequest(
+                "CN=127.0.0.1",
+                rsa,
+                HashAlgorithmName.SHA256,
+                RSASignaturePadding.Pkcs1);
+            var names = new SubjectAlternativeNameBuilder();
+            names.AddIpAddress(IPAddress.Loopback);
+            request.CertificateExtensions.Add(names.Build());
+            using X509Certificate2 generated = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddMinutes(-1),
+                DateTimeOffset.UtcNow.AddHours(1));
+            _certificate = new X509Certificate2(generated.Export(X509ContentType.Pfx));
+            _listener.Start();
+            BaseUri = new Uri($"https://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/");
+        }
+
+        internal Uri BaseUri { get; }
+        internal string CertificateThumbprint => _certificate.GetCertHashString();
+        internal List<HttpsRequest> Requests { get; } = [];
+
+        internal void SetManifest(JObject manifest, JObject envelope)
+        {
+            _manifest = manifest;
+            _envelope = envelope;
+        }
+
+        internal Task StartAsync()
+        {
+            _server = ServeAsync(_stop.Token);
+            return Task.CompletedTask;
+        }
+
+        private async Task ServeAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    using TcpClient client = await _listener.AcceptTcpClientAsync(cancellationToken);
+                    await using var tls = new SslStream(client.GetStream(), leaveInnerStreamOpen: false);
+                    await tls.AuthenticateAsServerAsync(
+                        _certificate,
+                        clientCertificateRequired: false,
+                        enabledSslProtocols: System.Security.Authentication.SslProtocols.Tls12 |
+                            System.Security.Authentication.SslProtocols.Tls13,
+                        checkCertificateRevocation: false);
+                    using var reader = new StreamReader(tls, Encoding.ASCII, false, 4096, leaveOpen: true);
+                    string requestLine = await reader.ReadLineAsync(cancellationToken) ?? string.Empty;
+                    var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    while (await reader.ReadLineAsync(cancellationToken) is string line && line.Length != 0)
+                    {
+                        int colon = line.IndexOf(':');
+                        if (colon > 0) headers[line[..colon].Trim()] = line[(colon + 1)..].Trim();
+                    }
+                    string path = requestLine.Split(' ', StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1) ?? string.Empty;
+                    Requests.Add(new HttpsRequest(
+                        path,
+                        headers.GetValueOrDefault("Authorization"),
+                        headers.GetValueOrDefault("x-revagent-device-id"),
+                        headers.GetValueOrDefault("x-revagent-machine-fingerprint")));
+                    byte[] body;
+                    string contentType;
+                    if (path == "/bridge/update/manifest")
+                    {
+                        body = Encoding.UTF8.GetBytes(new JObject
+                        {
+                            ["manifest"] = _manifest!.DeepClone(),
+                            ["signatureEnvelope"] = _envelope!.DeepClone(),
+                            ["deviceRing"] = 1,
+                        }.ToString(Newtonsoft.Json.Formatting.None));
+                        contentType = "application/json";
+                    }
+                    else
+                    {
+                        body = path.EndsWith("/bridge", StringComparison.Ordinal) ? _bridge : _addin;
+                        contentType = "application/zip";
+                    }
+                    byte[] response = Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 200 OK\r\nContent-Type: {contentType}\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+                    await tls.WriteAsync(response, cancellationToken);
+                    await tls.WriteAsync(body, cancellationToken);
+                    await tls.FlushAsync(cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+            if (_server is not null)
+            {
+                try { await _server; } catch (SocketException) when (_stop.IsCancellationRequested) { }
+            }
+            _certificate.Dispose();
+            _stop.Dispose();
+        }
     }
 
     private sealed class ComposedWorkerLauncher : IWorkerProcessLauncher

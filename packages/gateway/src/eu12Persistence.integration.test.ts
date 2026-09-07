@@ -1,4 +1,6 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
+
+import { canonicalizeJson, type JsonValue } from "@revagent/protocol";
 
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -10,6 +12,7 @@ import { PostgresTenantStore } from "./postgresTenantStore.js";
 import { InMemoryResultObjectStore, resultReferenceDigest } from "./resultReferenceStore.js";
 import { deriveMetricParity } from "./metricParity.js";
 import { Eu12EventBackpressureError } from "./eventPersistence.js";
+import { bridgeManifestDigest, verifyBridgeManifestSignature } from "./bridgeManifestSignature.js";
 
 const { Pool } = pg;
 const DATABASE_URL = process.env.EU10_DATABASE_URL;
@@ -760,6 +763,73 @@ suite("EU-12 Postgres event persistence", () => {
       .rejects.toThrow(/rollback (is forbidden|floor)|below rollback floor/u);
     await durable.close();
   }, 60_000);
+
+  it("persists exact two-component signed delivery and device-ring authority across restart", async () => {
+    const deviceId = randomUUID();
+    await admin.query("INSERT INTO devices(id,tenant_id,machine_name,status) VALUES($1,$2,$3,'active')", [deviceId, tenantA, `p3t12-${deviceId}`]);
+    const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const jwk = pair.publicKey.export({ format: "jwk" });
+    const publicXml = `<RSAKeyValue><Modulus>${Buffer.from(jwk.n!, "base64url").toString("base64")}</Modulus><Exponent>${Buffer.from(jwk.e!, "base64url").toString("base64")}</Exponent></RSAKeyValue>`;
+    const fingerprint = createHash("sha256").update(publicXml).digest("hex");
+    const releaseId = randomUUID();
+    const manifest = {
+      schemaVersion: 1, channel: "stable", version: "9.9.12", releaseSequence: 420,
+      components: [
+        { name: "bridge", version: "9.9.12", sha256: "a".repeat(64), sizeBytes: 101, url: `https://gateway.test/bridge/update/artifact/${releaseId}/bridge` },
+        { name: "addin", version: "9.9.12", sha256: "b".repeat(64), sizeBytes: 202, url: `https://gateway.test/bridge/update/artifact/${releaseId}/addin` },
+      ], rolloutPercent: 25, minSupportedVersion: "2.0.0", notes: "Postgres restart fixture",
+    } as JsonValue;
+    const signatureEnvelope: Record<string, JsonValue> = {
+      schemaVersion: 1, app: "revAgent", signedObject: "bridge-manifest", algorithm: "RS256",
+      keyId: "generated-p3t12", publicKeyFingerprint: fingerprint,
+      canonicalization: "RFC8785-JCS-SHA256-v1", contentSha256: bridgeManifestDigest(manifest),
+      createdAtUtc: "2026-09-08T00:00:00.0000000Z", signature: "",
+    };
+    const projection = { ...signatureEnvelope };
+    delete projection.signature;
+    signatureEnvelope.signature = sign("RSA-SHA256", Buffer.from(canonicalizeJson(projection)), pair.privateKey).toString("base64");
+    const trustedKeys = { "generated-p3t12": { publicKeyXml: publicXml, publicKeyFingerprint: fingerprint, algorithm: "RS256" as const } };
+    const bridgeManifestVerifier = (input: { readonly manifest: JsonValue; readonly signatureEnvelope: JsonValue }) =>
+      verifyBridgeManifestSignature({ manifest: input.manifest, envelope: input.signatureEnvelope, trustedKeys });
+    const objects = new InMemoryResultObjectStore();
+    const release = Object.freeze({
+      id: releaseId, channel: "stable" as const, version: "9.9.12", releaseSequence: 420, rollbackFloorSequence: 420,
+      manifest, signatureEnvelope, manifestDigest: bridgeManifestDigest(manifest), signingKeyId: "generated-p3t12",
+      components: Object.freeze({
+        bridge: Object.freeze({ name: "bridge" as const, version: "9.9.12", storageKey: `${releaseId}/bridge-${"a".repeat(64)}.zip`, sha256: "a".repeat(64), sizeBytes: 101, url: `https://gateway.test/bridge/update/artifact/${releaseId}/bridge` }),
+        addin: Object.freeze({ name: "addin" as const, version: "9.9.12", storageKey: `${releaseId}/addin-${"b".repeat(64)}.zip`, sha256: "b".repeat(64), sizeBytes: 202, url: `https://gateway.test/bridge/update/artifact/${releaseId}/addin` }),
+      }), rolloutPercent: 25, minSupportedVersion: "2.0.0", releasedAtMs: Date.parse("2026-09-08T00:00:00Z"), releasedBy: "github-actions",
+    });
+    const publisher = new PostgresEu12DataStore({
+      databaseUrl: runtimeDatabaseUrl, publisherDatabaseUrl: DATABASE_URL!, objects,
+      signatureVerifier: { verify: () => false }, pinnedSigningKeyIds: ["generated-p3t12"], bridgeManifestVerifier,
+    });
+    const publication = { release, tenantIds: [tenantA, tenantB], deviceRings: [{ tenantId: tenantA, deviceId, ring: 0 }] };
+    const firstAuthority = await publisher.publishBridgeUpdateRelease(publication);
+    expect(firstAuthority).toMatchObject({ releaseSequence: 420, releaseRollbackFloorSequence: 420, tenantIds: [tenantA, tenantB].sort() });
+    await expect(publisher.publishBridgeUpdateRelease(publication)).resolves.toEqual(firstAuthority);
+    await expect(publisher.publishBridgeUpdateRelease({
+      ...publication,
+      release: Object.freeze({ ...release, releasedAtMs: release.releasedAtMs + 1 }),
+    })).rejects.toThrow(/identity is immutable/u);
+    await expect(publisher.publishBridgeUpdateRelease({ ...publication, tenantIds: [randomUUID()], deviceRings: [] }))
+      .rejects.toThrow(/target tenant is unavailable/u);
+    await expect(publisher.readBridgeUpdateForDevice({ tenantId: tenantA, deviceId })).resolves.toMatchObject({
+      deviceRing: 0,
+      release: { id: releaseId, releaseSequence: 420 },
+    });
+    await publisher.close();
+    const restarted = new PostgresEu12DataStore({
+      databaseUrl: runtimeDatabaseUrl, objects, signatureVerifier: { verify: () => false },
+      pinnedSigningKeyIds: ["generated-p3t12"], bridgeManifestVerifier,
+    });
+    await expect(restarted.readBridgeUpdateForDevice({ tenantId: tenantA, deviceId })).resolves.toMatchObject({
+      deviceRing: 0,
+      release: { id: releaseId, releaseSequence: 420, manifestDigest: bridgeManifestDigest(manifest),
+        components: { bridge: { sha256: "a".repeat(64), sizeBytes: 101 }, addin: { sha256: "b".repeat(64), sizeBytes: 202 } } },
+    });
+    await restarted.close();
+  }, 30_000);
 
   it("upgrades multiple legacy result refs deterministically before the R17 uniqueness constraint", async () => {
     const databaseName = `eu12_legacy_${randomBytes(8).toString("hex")}`;

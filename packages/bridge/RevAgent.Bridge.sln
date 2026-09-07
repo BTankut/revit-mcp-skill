@@ -20,6 +20,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{56D93A93
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RevAgent.Bridge.RealWorkerHost.Tests", "tests\RevAgent.Bridge.RealWorkerHost.Tests\RevAgent.Bridge.RealWorkerHost.Tests.csproj", "{420C5FF0-6A61-42B0-A7E9-DE21622EFE8B}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RevAgent.Bridge.ReleaseSigner", "src\RevAgent.Bridge.ReleaseSigner\RevAgent.Bridge.ReleaseSigner.csproj", "{E6F164B4-B099-4A6B-91E5-08AB30B60038}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RevAgent.Bridge.ReleaseSigner.Tests", "tests\RevAgent.Bridge.ReleaseSigner.Tests\RevAgent.Bridge.ReleaseSigner.Tests.csproj", "{12BCAEC1-3863-45A0-BB14-B7788DF75AF8}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -58,8 +62,17 @@ Global
 		{420C5FF0-6A61-42B0-A7E9-DE21622EFE8B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{420C5FF0-6A61-42B0-A7E9-DE21622EFE8B}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{420C5FF0-6A61-42B0-A7E9-DE21622EFE8B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E6F164B4-B099-4A6B-91E5-08AB30B60038}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E6F164B4-B099-4A6B-91E5-08AB30B60038}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E6F164B4-B099-4A6B-91E5-08AB30B60038}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E6F164B4-B099-4A6B-91E5-08AB30B60038}.Release|Any CPU.Build.0 = Release|Any CPU
+		{12BCAEC1-3863-45A0-BB14-B7788DF75AF8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{12BCAEC1-3863-45A0-BB14-B7788DF75AF8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{12BCAEC1-3863-45A0-BB14-B7788DF75AF8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{12BCAEC1-3863-45A0-BB14-B7788DF75AF8}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{420C5FF0-6A61-42B0-A7E9-DE21622EFE8B} = {56D93A93-0E0F-48AF-89C0-F33EFD85CB3F}
+		{12BCAEC1-3863-45A0-BB14-B7788DF75AF8} = {56D93A93-0E0F-48AF-89C0-F33EFD85CB3F}
 	EndGlobalSection
 EndGlobal

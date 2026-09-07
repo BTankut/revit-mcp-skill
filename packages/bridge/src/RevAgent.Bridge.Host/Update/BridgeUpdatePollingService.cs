@@ -18,6 +18,7 @@ internal sealed record BridgeUpdatePollContext(
     Uri GatewayUri,
     BridgeUpdatePrincipal Principal,
     string BearerToken,
+    string MachineFingerprint,
     TrustedPublicKeyRing TrustedKeys,
     string InstalledVersion);
 
@@ -135,6 +136,7 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
             configuration.GatewayUri,
             principal,
             token.Reveal(),
+            credentialState.MachineFingerprint,
             trustedKeys,
             await ResolveInstalledVersionAsync(cancellationToken).ConfigureAwait(false));
         return await CheckOnceAsync(context, cancellationToken).ConfigureAwait(false);
@@ -175,12 +177,17 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
     {
         ArgumentNullException.ThrowIfNull(context);
         context.Principal.Validate();
+        ValidateHttpClaims(context);
         using HttpClient http = _httpClientFactory();
         Uri manifestUri = CreateManifestUri(context.GatewayUri);
         using var request = new HttpRequestMessage(HttpMethod.Get, manifestUri);
         request.Headers.Authorization = new AuthenticationHeaderValue(
             "Bearer",
             context.BearerToken);
+        AddDeviceClaims(
+            request,
+            context.Principal.DeviceId,
+            context.MachineFingerprint);
         request.Headers.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/json"));
         using HttpResponseMessage response = await http.SendAsync(
@@ -221,7 +228,9 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
         var artifacts = new AuthenticatedSessionArtifactSource(
             http,
             context.Principal,
-            manifestUri);
+            manifestUri,
+            context.BearerToken,
+            context.MachineFingerprint);
         var engine = new BridgeUpdateEngine(
             _layout,
             _stateStore,
@@ -343,6 +352,34 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
             Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     }
 
+    private static void ValidateHttpClaims(BridgeUpdatePollContext context)
+    {
+        if (string.IsNullOrWhiteSpace(context.BearerToken) ||
+            context.BearerToken.Any(char.IsWhiteSpace) ||
+            context.BearerToken.Any(char.IsControl) ||
+            !Guid.TryParse(context.Principal.DeviceId, out _) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(
+                context.MachineFingerprint,
+                "^sha256:[0-9a-f]{64}$",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+        {
+            throw new BridgeUpdateRejectedException(
+                "invalid_update_credentials",
+                "Authenticated update HTTP claims are invalid.");
+        }
+    }
+
+    private static void AddDeviceClaims(
+        HttpRequestMessage request,
+        string deviceId,
+        string machineFingerprint)
+    {
+        request.Headers.Add("x-revagent-device-id", deviceId);
+        request.Headers.Add(
+            "x-revagent-machine-fingerprint",
+            machineFingerprint);
+    }
+
     private async Task<string> ResolveInstalledVersionAsync(
         CancellationToken cancellationToken)
     {
@@ -445,15 +482,22 @@ internal sealed class AuthenticatedSessionArtifactSource : IBridgeUpdateArtifact
     private readonly HttpClient _http;
     private readonly BridgeUpdatePrincipal _principal;
     private readonly Uri _manifestUri;
+    private readonly string _bearerToken;
+    private readonly string _machineFingerprint;
 
     internal AuthenticatedSessionArtifactSource(
         HttpClient http,
         BridgeUpdatePrincipal principal,
-        Uri manifestUri)
+        Uri manifestUri,
+        string bearerToken,
+        string machineFingerprint)
     {
         _http = http ?? throw new ArgumentNullException(nameof(http));
         _principal = principal ?? throw new ArgumentNullException(nameof(principal));
         _manifestUri = manifestUri ?? throw new ArgumentNullException(nameof(manifestUri));
+        _bearerToken = bearerToken ?? throw new ArgumentNullException(nameof(bearerToken));
+        _machineFingerprint = machineFingerprint ??
+            throw new ArgumentNullException(nameof(machineFingerprint));
     }
 
     public async ValueTask<Stream> OpenReadAsync(
@@ -475,9 +519,90 @@ internal sealed class AuthenticatedSessionArtifactSource : IBridgeUpdateArtifact
                 "Artifact URL cannot equal the manifest endpoint.");
         }
 
-        // Signed object-store URLs carry their own bounded authorization. The
-        // device bearer token is deliberately not forwarded to another host.
-        return await _http.GetStreamAsync(artifactUri, cancellationToken)
-            .ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Get, artifactUri);
+        if (SameOrigin(_manifestUri, artifactUri))
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue(
+                "Bearer",
+                _bearerToken);
+            request.Headers.Add("x-revagent-device-id", _principal.DeviceId);
+            request.Headers.Add(
+                "x-revagent-machine-fingerprint",
+                _machineFingerprint);
+        }
+
+        HttpResponseMessage response = await _http.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            response.EnsureSuccessStatusCode();
+            Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return new ResponseOwnedStream(stream, response);
+        }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
+    }
+
+    private static bool SameOrigin(Uri left, Uri right) =>
+        string.Equals(left.Scheme, right.Scheme, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(left.IdnHost, right.IdnHost, StringComparison.OrdinalIgnoreCase) &&
+        left.Port == right.Port;
+
+    private sealed class ResponseOwnedStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly HttpResponseMessage _response;
+
+        internal ResponseOwnedStream(Stream inner, HttpResponseMessage response)
+        {
+            _inner = inner;
+            _response = response;
+        }
+
+        public override bool CanRead => _inner.CanRead;
+        public override bool CanSeek => _inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => _inner.Position = value; }
+        public override void Flush() => _inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) =>
+            _inner.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken) =>
+            _inner.ReadAsync(buffer, offset, count, cancellationToken);
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            _inner.ReadAsync(buffer, cancellationToken);
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _inner.Dispose();
+                _response.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            await _inner.DisposeAsync().ConfigureAwait(false);
+            _response.Dispose();
+            GC.SuppressFinalize(this);
+        }
     }
 }
