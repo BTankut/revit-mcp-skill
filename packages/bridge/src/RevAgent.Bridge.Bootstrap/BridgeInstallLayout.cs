@@ -37,6 +37,9 @@ internal sealed record BridgeInstallLayout(string InstallRoot, string StateRoot)
     internal string HostExecutablePath =>
         Path.Combine(InstallRoot, HostExecutableName);
 
+    internal string UpdateTrustedKeysPath =>
+        Path.Combine(InstallRoot, "update-trusted-keys.json");
+
     internal string VersionsRoot =>
         Path.Combine(InstallRoot, "versions");
 
@@ -78,4 +81,22 @@ internal sealed record BridgeInstallLayout(string InstallRoot, string StateRoot)
 
     internal string BundleExtractionRoot =>
         Path.Combine(StateRoot, "bundle-extract");
+
+    internal string UpdateRoot =>
+        Path.Combine(StateRoot, "updates");
+
+    internal string UpdateStagingRoot =>
+        Path.Combine(UpdateRoot, "staging");
+
+    internal string UpdateStatePath =>
+        Path.Combine(UpdateRoot, "state.json");
+
+    internal string CurrentVersionPointerPath =>
+        Path.Combine(UpdateRoot, "current.version");
+
+    internal string AddinRoot =>
+        Path.Combine(
+            Directory.GetParent(Path.GetFullPath(InstallRoot))?.FullName
+                ?? Path.GetFullPath(InstallRoot),
+            "Addin");
 }

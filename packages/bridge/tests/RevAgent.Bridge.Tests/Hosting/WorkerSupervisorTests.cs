@@ -2,6 +2,7 @@ using RevAgent.Bridge.Bootstrap;
 using RevAgent.Bridge.Bootstrap.Control;
 using RevAgent.Bridge.Bootstrap.Logging;
 using RevAgent.Bridge.Host.Hosting;
+using RevAgent.Bridge.Host.Update;
 
 namespace RevAgent.Bridge.Tests.Hosting;
 
@@ -139,6 +140,138 @@ public sealed class WorkerSupervisorTests
         Assert.True(launcher.LastProcess?.Killed);
     }
 
+    [Fact]
+    public async Task ThirdCrashAfterVersionFlipRestoresPreviousWorkerAndKeepsHostAlive()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var fixture = new SupervisorFixture();
+        string previous = Path.Combine(fixture.Layout.VersionsRoot, "1.0.0");
+        string current = Path.Combine(fixture.Layout.VersionsRoot, "2.0.0");
+        Directory.CreateDirectory(previous);
+        Directory.CreateDirectory(current);
+        File.WriteAllText(
+            Path.Combine(previous, BridgeInstallLayout.WorkerExecutableName),
+            "previous");
+        File.WriteAllText(
+            Path.Combine(current, BridgeInstallLayout.WorkerExecutableName),
+            "bad");
+        var stateStore = new BridgeUpdateStateStore(fixture.Layout);
+        await stateStore.WriteCurrentVersionAsync("2.0.0", CancellationToken.None);
+        await stateStore.MutateAsync(
+            state => state with
+            {
+                TenantBinding = "tenant-a",
+                DeviceId = "device-1",
+                AuthenticatedSessionId = "session-1",
+                ActiveVersion = "2.0.0",
+                PreviousVersion = "1.0.0",
+                HighestAcceptedReleaseSequence = 2,
+                VersionActivatedAtUtc = DateTimeOffset.UtcNow,
+            },
+            CancellationToken.None);
+
+        var launcher = new InProcessWorkerLauncher(
+            "2.0.0",
+            unexpectedExitsBeforeStable: 3);
+        await using var log = new NullBridgeLog();
+        var rollback = new CrashLoopRollbackController(
+            fixture.Layout,
+            stateStore,
+            new NeverRunningRevitProbe());
+        await using var supervisor = new WorkerSupervisor(
+            fixture.Layout,
+            launcher,
+            log,
+            rollbackController: rollback);
+
+        await supervisor.StartAsync(CancellationToken.None);
+        Task<WorkerExit> monitor = supervisor.WaitForExitAsync(CancellationToken.None);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (launcher.StartCount < 4)
+        {
+            await Task.Delay(20, timeout.Token);
+        }
+
+        WorkerStopResult stop = await supervisor.StopAsync(
+            WorkerStopReason.HostShutdown,
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+        WorkerExit exit = await monitor;
+        BridgeUpdateState state = await stateStore.ReadAsync(CancellationToken.None);
+
+        Assert.True(stop.Graceful);
+        Assert.False(exit.RestartBudgetExhausted);
+        Assert.Equal("1.0.0", state.ActiveVersion);
+        Assert.Contains("2.0.0", state.QuarantinedVersions.Keys);
+        Assert.Equal(
+            "1.0.0",
+            File.ReadAllText(fixture.Layout.CurrentVersionPointerPath).Trim());
+    }
+
+    [Fact]
+    public async Task PlannedUpdateRestartLaunchesNewPointerWithoutCrashAccounting()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var fixture = new SupervisorFixture();
+        string next = Path.Combine(fixture.Layout.VersionsRoot, "2.0.0");
+        Directory.CreateDirectory(next);
+        File.WriteAllText(
+            Path.Combine(next, BridgeInstallLayout.WorkerExecutableName),
+            "next");
+        var stateStore = new BridgeUpdateStateStore(fixture.Layout);
+        await stateStore.MutateAsync(
+            state => state with
+            {
+                TenantBinding = "tenant-a",
+                DeviceId = "device-1",
+                AuthenticatedSessionId = "session-1",
+                ActiveVersion = "2.0.0",
+                PreviousVersion = "1.0.0",
+                HighestAcceptedReleaseSequence = 2,
+                VersionActivatedAtUtc = DateTimeOffset.UtcNow,
+            },
+            CancellationToken.None);
+
+        var launcher = new InProcessWorkerLauncher("2.0.0");
+        await using var log = new NullBridgeLog();
+        var rollback = new CrashLoopRollbackController(
+            fixture.Layout,
+            stateStore,
+            new NeverRunningRevitProbe());
+        await using var supervisor = new WorkerSupervisor(
+            fixture.Layout,
+            launcher,
+            log,
+            rollbackController: rollback);
+        await supervisor.StartAsync(CancellationToken.None);
+        Task<WorkerExit> monitor = supervisor.WaitForExitAsync(CancellationToken.None);
+
+        await stateStore.WriteCurrentVersionAsync("2.0.0", CancellationToken.None);
+        await supervisor.RequestUpdateRestartAsync(CancellationToken.None);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (launcher.StartCount < 2)
+        {
+            await Task.Delay(20, timeout.Token);
+        }
+
+        Assert.Equal(next, launcher.LastStart!.WorkingDirectory);
+        Assert.Empty((await stateStore.ReadAsync(CancellationToken.None))
+            .AbnormalExitTimesUtc);
+        _ = await supervisor.StopAsync(
+            WorkerStopReason.HostShutdown,
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+        _ = await monitor;
+    }
+
     private static string ValueAfter(
         IReadOnlyList<string> arguments,
         string option)
@@ -182,25 +315,31 @@ public sealed class WorkerSupervisorTests
         private readonly string _readyVersion;
         private readonly bool _ignoreStop;
         private readonly bool _invalidStopping;
+        private readonly int _unexpectedExitsBeforeStable;
+        private int _startCount;
 
         internal InProcessWorkerLauncher(
             string probedVersion,
             string? readyVersion = null,
             bool ignoreStop = false,
-            bool invalidStopping = false)
+            bool invalidStopping = false,
+            int unexpectedExitsBeforeStable = 0)
         {
             _probedVersion = probedVersion;
             _readyVersion = readyVersion ?? probedVersion;
             _ignoreStop = ignoreStop;
             _invalidStopping = invalidStopping;
+            _unexpectedExitsBeforeStable = unexpectedExitsBeforeStable;
         }
 
         internal WorkerStartRequest? LastStart { get; private set; }
         internal FakeWorkerProcess? LastProcess { get; private set; }
+        internal int StartCount => Volatile.Read(ref _startCount);
 
         public IWorkerProcess Start(WorkerStartRequest request)
         {
             LastStart = request;
+            int startNumber = Interlocked.Increment(ref _startCount);
             var process = new FakeWorkerProcess(Environment.ProcessId);
             LastProcess = process;
 
@@ -215,7 +354,8 @@ public sealed class WorkerSupervisorTests
                 process,
                 pipeName,
                 hostPid,
-                instanceId);
+                instanceId,
+                startNumber <= _unexpectedExitsBeforeStable);
             return process;
         }
 
@@ -239,7 +379,8 @@ public sealed class WorkerSupervisorTests
             FakeWorkerProcess process,
             string pipeName,
             int hostPid,
-            Guid instanceId)
+            Guid instanceId,
+            bool exitUnexpectedly)
         {
             try
             {
@@ -256,6 +397,13 @@ public sealed class WorkerSupervisorTests
                         process.Id,
                         _readyVersion),
                     CancellationToken.None);
+                if (exitUnexpectedly)
+                {
+                    await Task.Delay(50);
+                    process.Complete(42);
+                    return;
+                }
+
                 ControlMessage? message = await connection.ReceiveAsync(
                     CancellationToken.None);
                 if (message is StopWorker && _ignoreStop)
@@ -296,6 +444,11 @@ public sealed class WorkerSupervisorTests
                 process.Complete(-9);
             }
         }
+    }
+
+    private sealed class NeverRunningRevitProbe : IRevitProcessProbe
+    {
+        public bool IsRevitRunning() => false;
     }
 
     private sealed class FakeWorkerProcess : IWorkerProcess

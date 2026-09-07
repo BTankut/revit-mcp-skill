@@ -1,6 +1,7 @@
 using RevAgent.Bridge.Bootstrap;
 using RevAgent.Bridge.Bootstrap.Control;
 using RevAgent.Bridge.Bootstrap.Logging;
+using RevAgent.Bridge.Host.Update;
 
 namespace RevAgent.Bridge.Host.Hosting;
 
@@ -9,6 +10,7 @@ internal enum WorkerStopReason
     ScmStop,
     ConsoleStop,
     HostShutdown,
+    UpdateApply,
 }
 
 internal sealed record WorkerExit(
@@ -41,6 +43,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     private readonly IWorkerProcessLauncher _launcher;
     private readonly IBridgeLog _log;
     private readonly TimeProvider _timeProvider;
+    private readonly CrashLoopRollbackController? _rollbackController;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly CancellationTokenSource _shutdownSource = new();
 
@@ -48,17 +51,20 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     private int _stopRequested;
     private int _started;
     private int _disposed;
+    private int _plannedUpdateRestart;
 
     internal WorkerSupervisor(
         BridgeInstallLayout layout,
         IWorkerProcessLauncher launcher,
         IBridgeLog log,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        CrashLoopRollbackController? rollbackController = null)
     {
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _launcher = launcher ?? throw new ArgumentNullException(nameof(launcher));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _rollbackController = rollbackController;
     }
 
     internal async Task StartAsync(CancellationToken cancellationToken)
@@ -116,6 +122,25 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                 lastExitCode,
                 lastDiagnostics,
                 cancellationToken).ConfigureAwait(false);
+
+            bool plannedUpdateRestart =
+                Interlocked.Exchange(ref _plannedUpdateRestart, 0) != 0;
+            CrashRollbackResult? rollback =
+                plannedUpdateRestart || _rollbackController is null || lastExitCode == 0
+                ? null
+                : await _rollbackController.RecordUnexpectedExitAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            if (rollback?.RolledBack == true)
+            {
+                restartCount = 0;
+                await TryLogAsync(
+                    "error",
+                    "worker_version_rolled_back",
+                    $"Worker version '{rollback.QuarantinedVersion}' crashed " +
+                    $"{rollback.CrashCount} times; restored '{rollback.ActiveVersion}' " +
+                    "and quarantined the bad version.",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
 
             await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -335,6 +360,56 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                 }
 
                 return forced;
+            }
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    internal async Task RequestUpdateRestartAsync(
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        EnsureStarted();
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            RunningWorker worker = _current ??
+                throw new InvalidOperationException("No Bridge worker is running.");
+            Interlocked.Exchange(ref _plannedUpdateRestart, 1);
+            using var restartSource = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            restartSource.CancelAfter(GracefulStopTimeout);
+            try
+            {
+                var stop = new StopWorker(
+                    ControlProtocol.Version,
+                    worker.InstanceId,
+                    ToWireReason(WorkerStopReason.UpdateApply),
+                    _timeProvider.GetUtcNow()
+                        .Add(GracefulStopTimeout)
+                        .ToUnixTimeMilliseconds());
+                await worker.Connection.SendAsync(stop, restartSource.Token)
+                    .ConfigureAwait(false);
+                ControlMessage? acknowledgement = await worker.Connection
+                    .ReceiveAsync(restartSource.Token).ConfigureAwait(false);
+                if (acknowledgement is not WorkerStopping stopping ||
+                    stopping.WorkerPid != worker.Process.Id)
+                {
+                    throw new ControlProtocolException(
+                        "control_stopping_invalid",
+                        "Worker did not acknowledge the update restart.");
+                }
+
+                _ = await worker.Process.WaitForExitAsync(restartSource.Token)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                worker.Process.KillTree();
+                throw;
             }
         }
         finally
@@ -662,6 +737,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             WorkerStopReason.ScmStop => "scm_stop",
             WorkerStopReason.ConsoleStop => "console_stop",
             WorkerStopReason.HostShutdown => "host_shutdown",
+            WorkerStopReason.UpdateApply => "update_apply",
             _ => throw new ArgumentOutOfRangeException(nameof(reason)),
         };
 
