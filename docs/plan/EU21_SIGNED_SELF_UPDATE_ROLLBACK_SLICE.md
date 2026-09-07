@@ -101,6 +101,19 @@ Park List:
 
 ## Superseding blocking-review evidence
 
+### Conformance inventory scope amendment — 2026-09-08
+
+Exact-head Gateway CI on `75bb0ede` found the new
+`bridgeUpdateReporting.test.ts` missing from the explicit inventory in
+`packages/rbp-conformance/tests/boundedRetentionCurrentTopology.test.ts`.
+This amendment includes only that test file: record the new ordinary
+`createRestartableTestStore` consumer in the expected inventory. The
+ownership-sensitive retention allowlist, production profiles, and assertions
+that every outside consumer is a test using that fixture stay intact.
+No protocol or production behavior changes. The existing local delivery and
+review evidence remains applicable to its unchanged inputs; the focused
+topology test and protected final-head checks verify this amendment.
+
 The rework closes every blocker recorded for `68edf583`:
 
 | Review blocker | Superseding evidence |
