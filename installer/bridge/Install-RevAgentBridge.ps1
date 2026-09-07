@@ -275,16 +275,36 @@ try {
         }.GetNewClosure())
 
     # --- 6. Copy signed binaries into the disjoint install root ---
-    [void](Invoke-RevAgentBridgeGuardedMutation -Target $layout.HostExecutablePath -MutationAction 'deploy_host_executable' -DryRun $isDryRun -Steps $steps -Apply {
-            [void](Assert-RevAgentBridgeNoReparsePoint -Path $layout.HostExecutablePath -GuardRoot $layout.InstallRoot)
-            Copy-Item -LiteralPath $hostSourcePath -Destination $layout.HostExecutablePath -Force
-            return $layout.HostExecutablePath
-        })
-    [void](Invoke-RevAgentBridgeGuardedMutation -Target $layout.CurrentWorkerDirectory -MutationAction 'deploy_worker_payload' -DryRun $isDryRun -Steps $steps -Apply {
-            [void](Assert-RevAgentBridgeNoReparsePoint -Path $layout.CurrentWorkerDirectory -GuardRoot $layout.InstallRoot)
-            Copy-RevAgentBridgeDirectoryContents -SourceDirectory $workerSourceDirectory -DestinationDirectory $layout.CurrentWorkerDirectory
-            return $layout.CurrentWorkerDirectory
-        })
+    $hostPayloadIdentical = -not $isDryRun -and (Test-RevAgentBridgeIdenticalPayload `
+        -DestinationPath $layout.HostExecutablePath `
+        -ExpectedSha256 ([string]$verifiedContent.host.sha256) `
+        -GuardRoot $layout.InstallRoot)
+    if ($hostPayloadIdentical) {
+        [void]$steps.Add([pscustomobject][ordered]@{ target = $layout.HostExecutablePath; action = 'deploy_host_executable'; status = 'verified'; detail = 'retained_identical_signed_payload' })
+    }
+    else {
+        [void](Invoke-RevAgentBridgeGuardedMutation -Target $layout.HostExecutablePath -MutationAction 'deploy_host_executable' -DryRun $isDryRun -Steps $steps -Apply {
+                [void](Assert-RevAgentBridgeNoReparsePoint -Path $layout.HostExecutablePath -GuardRoot $layout.InstallRoot)
+                Copy-Item -LiteralPath $hostSourcePath -Destination $layout.HostExecutablePath -Force
+                return $layout.HostExecutablePath
+            })
+    }
+    $workerPayloadIdentical = -not $isDryRun -and (Test-RevAgentBridgeIdenticalPayload `
+        -SourceDirectory $workerSourceDirectory `
+        -DestinationPath $layout.CurrentWorkerDirectory `
+        -ExpectedSha256 ([string]$verifiedContent.worker.sha256) `
+        -GuardRoot $layout.InstallRoot `
+        -Directory)
+    if ($workerPayloadIdentical) {
+        [void]$steps.Add([pscustomobject][ordered]@{ target = $layout.CurrentWorkerDirectory; action = 'deploy_worker_payload'; status = 'verified'; detail = 'retained_identical_signed_payload' })
+    }
+    else {
+        [void](Invoke-RevAgentBridgeGuardedMutation -Target $layout.CurrentWorkerDirectory -MutationAction 'deploy_worker_payload' -DryRun $isDryRun -Steps $steps -Apply {
+                [void](Assert-RevAgentBridgeNoReparsePoint -Path $layout.CurrentWorkerDirectory -GuardRoot $layout.InstallRoot)
+                Copy-RevAgentBridgeDirectoryContents -SourceDirectory $workerSourceDirectory -DestinationDirectory $layout.CurrentWorkerDirectory
+                return $layout.CurrentWorkerDirectory
+            })
+    }
 
     # --- 7. Strict configuration; existing settings are never replaced. ---
     [void](Invoke-RevAgentBridgeGuardedMutation -Target $layout.ConfigurationPath -MutationAction 'write_bridge_config' -DryRun $isDryRun -Steps $steps -Apply {
@@ -294,20 +314,40 @@ try {
         })
 
     # --- 8. Add-in payload + deterministic manifest (P-INST-1 / P3-T9) ---
-    [void](Invoke-RevAgentBridgeGuardedMutation -Target $addinLayout.AddinBinRoot -MutationAction 'deploy_addin_payload' -DryRun $isDryRun -Steps $steps -Apply {
-            [void](New-RevAgentBridgeGuardedDirectory -Path $addinLayout.AddinBinRoot -GuardRoot $addinProgramFilesGuard)
-            Copy-RevAgentBridgeDirectoryContents -SourceDirectory $addinSourceDirectory -DestinationDirectory $addinLayout.AddinBinRoot
-            Set-RevAgentBridgeDistributionAcl -Path $addinLayout.AddinBinRoot -IcaclsInvoker $IcaclsInvoker
-            return $addinLayout.AddinBinRoot
-        }.GetNewClosure())
+    $addinPayloadIdentical = -not $isDryRun -and (Test-RevAgentBridgeIdenticalPayload `
+        -SourceDirectory $addinSourceDirectory `
+        -DestinationPath $addinLayout.AddinBinRoot `
+        -ExpectedSha256 ([string]$verifiedContent.addin.sha256) `
+        -GuardRoot $addinProgramFilesGuard `
+        -Directory)
+    if ($addinPayloadIdentical) {
+        [void]$steps.Add([pscustomobject][ordered]@{ target = $addinLayout.AddinBinRoot; action = 'deploy_addin_payload'; status = 'verified'; detail = 'retained_identical_signed_payload' })
+    }
+    else {
+        [void](Invoke-RevAgentBridgeGuardedMutation -Target $addinLayout.AddinBinRoot -MutationAction 'deploy_addin_payload' -DryRun $isDryRun -Steps $steps -Apply {
+                [void](New-RevAgentBridgeGuardedDirectory -Path $addinLayout.AddinBinRoot -GuardRoot $addinProgramFilesGuard)
+                Copy-RevAgentBridgeDirectoryContents -SourceDirectory $addinSourceDirectory -DestinationDirectory $addinLayout.AddinBinRoot
+                Set-RevAgentBridgeDistributionAcl -Path $addinLayout.AddinBinRoot -IcaclsInvoker $IcaclsInvoker
+                return $addinLayout.AddinBinRoot
+            }.GetNewClosure())
+    }
     $manifestContract = New-RevAgentBridgeAddinManifestContract -AssemblyPath $addinLayout.AssemblyPath
     $installSummary.addinManifestPath = $addinLayout.ManifestPath
     $installSummary.addinManifestSha256 = $manifestContract.sha256
-    [void](Invoke-RevAgentBridgeGuardedMutation -Target $addinLayout.ManifestPath -MutationAction 'write_addin_manifest' -DryRun $isDryRun -Steps $steps -Apply {
-            [void](New-RevAgentBridgeGuardedDirectory -Path $addinLayout.ManifestDirectory -GuardRoot $revitAddinsGuard)
-            [void](Write-RevAgentBridgeOwnedManifest -Path $addinLayout.ManifestPath -AssemblyPath $addinLayout.AssemblyPath -GuardRoot $addinLayout.ManifestDirectory -IcaclsInvoker $IcaclsInvoker)
-            return $manifestContract.sha256
-        }.GetNewClosure())
+    $addinManifestIdentical = -not $isDryRun -and (Test-RevAgentBridgeIdenticalPayload `
+        -DestinationPath $addinLayout.ManifestPath `
+        -ExpectedSha256 $manifestContract.sha256 `
+        -GuardRoot $revitAddinsGuard)
+    if ($addinManifestIdentical) {
+        [void]$steps.Add([pscustomobject][ordered]@{ target = $addinLayout.ManifestPath; action = 'write_addin_manifest'; status = 'verified'; detail = 'retained_identical_signed_payload' })
+    }
+    else {
+        [void](Invoke-RevAgentBridgeGuardedMutation -Target $addinLayout.ManifestPath -MutationAction 'write_addin_manifest' -DryRun $isDryRun -Steps $steps -Apply {
+                [void](New-RevAgentBridgeGuardedDirectory -Path $addinLayout.ManifestDirectory -GuardRoot $revitAddinsGuard)
+                [void](Write-RevAgentBridgeOwnedManifest -Path $addinLayout.ManifestPath -AssemblyPath $addinLayout.AssemblyPath -GuardRoot $addinLayout.ManifestDirectory -IcaclsInvoker $IcaclsInvoker)
+                return $manifestContract.sha256
+            }.GetNewClosure())
+    }
 
     # --- 9. Prepare identity and enrollment before the first service start ---
     if ($deviceCredentialAlreadyExists) {
