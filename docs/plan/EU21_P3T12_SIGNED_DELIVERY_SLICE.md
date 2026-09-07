@@ -81,11 +81,14 @@ Focused evidence:
   process/store restart proof, not a PostgreSQL server-restart claim.
 - `artifacts/eu21-p3t12-delivery/logs/workflow-action-pins.log` and
   `workflow-yaml.log`: immutable action pins and three-job YAML parse.
-- `artifacts/eu21-p3t12-delivery/actual-source-release/`: generated-key
-  actual-source proof containing one 33,610,922-byte single-file worker ZIP
-  (`71517e1e4041548601aeeea4791cf39eafdfe2428ad21bad7f35f9dd3600479f`)
-  and one 2,188,126-byte Revit 2022 add-in ZIP
-  (`1231a593fb81baa3ddfb3e76f8757d4c90d07b9e73469810bf7146798be2fe2f`).
+- `artifacts/eu21-p3t12-delivery/actual-source-release-d8528542/`:
+  generated-key actual-source proof bound by provenance to implementation
+  commit `d8528542085b02c6574d4cd3e72c40ad9aed8bc5` and tree
+  `5070ac5ac896565922f59061d222ed13a397c069`; it contains one
+  33,610,567-byte single-file worker ZIP
+  (`924a1d912d9a0be4267e26658a5fe814b02dc50f8eb3b43b6e0a5545dc4fdc3e`)
+  and one 2,188,129-byte Revit 2022 add-in ZIP
+  (`3f1b798255d8ced57edc314a5614fd0d5659f529e7f142db8f140aae1eb3f7a1`).
 
 Forecast was 2.5–3.5 development days (20–28 hours). Actual elapsed source
 execution from draft creation to this checkpoint was 1.0 hour (0.125 of an
