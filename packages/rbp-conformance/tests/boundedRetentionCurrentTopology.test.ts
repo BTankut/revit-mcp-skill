@@ -69,6 +69,9 @@ describe("WP-12 bounded retention current topology", () => {
     }
     expect(outside.sort()).toEqual([
       "batchDispatch.test.ts",
+      // EU-21 reporting uses the same restartable-memory fixture; it owns no
+      // production retention/resource authority.
+      "bridgeUpdateReporting.test.ts",
       // EU-20-AUTH-INGRESS (PR #409): constructs `GatewayBridgeSessionAuthority`
       // directly, with the ordinary `createRestartableTestStore` fixture (like
       // the other entries here), to drive production-ingress evidence for the
