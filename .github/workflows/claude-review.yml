@@ -8,7 +8,7 @@ name: Claude Code Review
 # Runs ONCE when the PR is marked ready (not on every push). Effort is risk-tiered
 # (high default, xhigh when risk paths are touched). Emits a structured verdict
 # that gates auto-merge (fail closed: no verdict / blocking issue => check goes RED).
-# Model: Opus 4.8.
+# Model: Opus 5.
 
 on:
   pull_request:
@@ -190,7 +190,7 @@ jobs:
             - tally = the same one-line tally you used in the top-level comment
               (or "No blocking issues found." when clean).
           claude_args: |
-            --model claude-opus-4-8
+            --model claude-opus-5
             --effort ${{ steps.tier.outputs.effort }}
             --json-schema '{"type":"object","properties":{"blocking":{"type":"boolean"},"tally":{"type":"string"}},"required":["blocking","tally"]}'
             --allowedTools "Read,Grep,Glob,LS,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git diff:*),Bash(git grep:*),Bash(rg:*),Bash(grep:*),Bash(find:*),Bash(cat:*),Bash(ls:*),Bash(head:*),Bash(tail:*),Bash(wc:*)"
