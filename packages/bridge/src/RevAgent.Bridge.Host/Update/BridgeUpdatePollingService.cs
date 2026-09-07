@@ -8,10 +8,18 @@ using RevAgent.Bridge.Bootstrap;
 using RevAgent.Bridge.Bootstrap.Configuration;
 using RevAgent.Bridge.Bootstrap.Enrollment;
 using RevAgent.Bridge.Bootstrap.Logging;
+using RevAgent.Bridge.Bootstrap.Updates;
 using RevAgent.Bridge.Host.Hosting;
 using RevAgent.Contracts.Signing;
 
 namespace RevAgent.Bridge.Host.Update;
+
+internal sealed record BridgeUpdatePollContext(
+    Uri GatewayUri,
+    BridgeUpdatePrincipal Principal,
+    string BearerToken,
+    TrustedPublicKeyRing TrustedKeys,
+    string InstalledVersion);
 
 internal sealed class BridgeUpdatePollingService : BackgroundService
 {
@@ -24,21 +32,27 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
     private readonly IBridgeLog _log;
     private readonly TimeProvider _timeProvider;
     private readonly Func<HttpClient> _httpClientFactory;
+    private readonly BridgeUpdateReportStore _reports;
+    private readonly IRevitProcessProbe _revit;
 
     internal BridgeUpdatePollingService(
         BridgeInstallLayout layout,
         BridgeUpdateStateStore stateStore,
         WorkerSupervisor supervisor,
         IBridgeLog log,
+        BridgeUpdateReportStore reports,
         TimeProvider? timeProvider = null,
-        Func<HttpClient>? httpClientFactory = null)
+        Func<HttpClient>? httpClientFactory = null,
+        IRevitProcessProbe? revit = null)
     {
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _supervisor = supervisor ?? throw new ArgumentNullException(nameof(supervisor));
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _reports = reports ?? throw new ArgumentNullException(nameof(reports));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _httpClientFactory = httpClientFactory ?? CreateHttpClient;
+        _revit = revit ?? new SystemRevitProcessProbe();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -47,7 +61,7 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
         {
             try
             {
-                BridgeUpdateResult? result = await CheckOnceAsync(stoppingToken)
+                BridgeUpdateResult? result = await PollAndRestartOnceAsync(stoppingToken)
                     .ConfigureAwait(false);
                 if (result is not null)
                 {
@@ -57,11 +71,6 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
                         $"Update version={result.Version}, sequence={result.ReleaseSequence}, " +
                         $"state={result.Disposition}, reason={result.Reason}.",
                         stoppingToken).ConfigureAwait(false);
-                    if (result.BridgeApplied)
-                    {
-                        await _supervisor.RequestUpdateRestartAsync(stoppingToken)
-                            .ConfigureAwait(false);
-                    }
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -121,14 +130,57 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
             credential.DeviceId,
             sessionId);
 
-        using HttpClient http = _httpClientFactory();
         using var token = credential.DeviceToken.Clone();
-        string revealedToken = token.Reveal();
-        Uri manifestUri = CreateManifestUri(configuration.GatewayUri);
+        var context = new BridgeUpdatePollContext(
+            configuration.GatewayUri,
+            principal,
+            token.Reveal(),
+            trustedKeys,
+            await ResolveInstalledVersionAsync(cancellationToken).ConfigureAwait(false));
+        return await CheckOnceAsync(context, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<BridgeUpdateResult?> PollAndRestartOnceAsync(
+        CancellationToken cancellationToken)
+    {
+        BridgeUpdateResult? result = await CheckOnceAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (result?.BridgeApplied == true)
+        {
+            await _supervisor.RequestUpdateRestartAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    internal async Task<BridgeUpdateResult> PollAndRestartOnceAsync(
+        BridgeUpdatePollContext context,
+        CancellationToken cancellationToken)
+    {
+        BridgeUpdateResult result = await CheckOnceAsync(context, cancellationToken)
+            .ConfigureAwait(false);
+        if (result.BridgeApplied)
+        {
+            await _supervisor.RequestUpdateRestartAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    internal async Task<BridgeUpdateResult> CheckOnceAsync(
+        BridgeUpdatePollContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        context.Principal.Validate();
+        using HttpClient http = _httpClientFactory();
+        Uri manifestUri = CreateManifestUri(context.GatewayUri);
         using var request = new HttpRequestMessage(HttpMethod.Get, manifestUri);
         request.Headers.Authorization = new AuthenticationHeaderValue(
             "Bearer",
-            revealedToken);
+            context.BearerToken);
         request.Headers.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/json"));
         using HttpResponseMessage response = await http.SendAsync(
@@ -140,7 +192,16 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
             response.Content,
             MaximumManifestResponseBytes,
             cancellationToken).ConfigureAwait(false);
-        JObject wrapper = JObject.Parse(new UTF8Encoding(false, true).GetString(responseBytes));
+        JObject wrapper;
+        using (var text = new StringReader(
+            new UTF8Encoding(false, true).GetString(responseBytes)))
+        using (var reader = new Newtonsoft.Json.JsonTextReader(text)
+        {
+            DateParseHandling = Newtonsoft.Json.DateParseHandling.None,
+        })
+        {
+            wrapper = JObject.Load(reader);
+        }
         RejectUnexpectedWrapperFields(wrapper);
         if (wrapper["manifest"] is not JObject manifest ||
             wrapper["signatureEnvelope"] is not JObject signature ||
@@ -157,23 +218,60 @@ internal sealed class BridgeUpdatePollingService : BackgroundService
                 "Authenticated update response shape is invalid.");
         }
 
-        string installedVersion = await ResolveInstalledVersionAsync(cancellationToken)
-            .ConfigureAwait(false);
         var artifacts = new AuthenticatedSessionArtifactSource(
             http,
-            principal,
+            context.Principal,
             manifestUri);
         var engine = new BridgeUpdateEngine(
             _layout,
             _stateStore,
-            trustedKeys,
+            context.TrustedKeys,
             artifacts,
-            new SystemRevitProcessProbe(),
-            installedVersion,
-            _timeProvider);
-        return await engine.ApplyAsync(
-            new SignedBridgeUpdate(manifest, signature, principal, deviceRing),
-            cancellationToken).ConfigureAwait(false);
+            _revit,
+            context.InstalledVersion,
+            _timeProvider,
+            _reports);
+        try
+        {
+            return await engine.ApplyAsync(
+                new SignedBridgeUpdate(
+                    manifest,
+                    signature,
+                    context.Principal,
+                    deviceRing),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (BridgeUpdateRejectedException exception)
+        {
+            BridgeUpdateState state = await _stateStore.ReadAsync(cancellationToken)
+                .ConfigureAwait(false);
+            string digest;
+            try
+            {
+                digest = "sha256:" + CanonicalJson.Sha256Hex(manifest).ToLowerInvariant();
+            }
+            catch
+            {
+                digest = "sha256:" + Convert.ToHexString(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(manifest.ToString())))
+                    .ToLowerInvariant();
+            }
+
+            string toVersion = manifest.Value<string>("version") ?? string.Empty;
+            long releaseSequence = manifest.Value<long?>("releaseSequence") ?? 0;
+            _ = await _reports.AppendAsync(
+                context.Principal.DeviceId,
+                state.ActiveVersion,
+                toVersion,
+                releaseSequence,
+                digest,
+                BridgeUpdateReportStates.Refused,
+                exception.Code,
+                exception.Message,
+                _timeProvider.GetUtcNow(),
+                cancellationToken).ConfigureAwait(false);
+            throw;
+        }
     }
 
     internal static Uri CreateManifestUri(Uri gatewayUri)

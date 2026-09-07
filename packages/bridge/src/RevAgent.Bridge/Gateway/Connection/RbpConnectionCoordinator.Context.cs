@@ -54,6 +54,7 @@ internal sealed partial class RbpConnectionCoordinator
     private sealed record HeartbeatFlight(
         RbpHeartbeatFence Fence,
         Task Deadline,
+        IReadOnlyList<string> UpdateReportIds,
         TaskCompletionSource Observed,
         TaskCompletionSource Applied);
 
@@ -1094,7 +1095,8 @@ internal sealed partial class RbpConnectionCoordinator
 
         internal HeartbeatFlight InstallHeartbeatFlight(
             RbpHeartbeatFence fence,
-            Task deadline)
+            Task deadline,
+            IReadOnlyList<string> updateReportIds)
         {
             ArgumentNullException.ThrowIfNull(fence);
             ArgumentNullException.ThrowIfNull(deadline);
@@ -1110,6 +1112,7 @@ internal sealed partial class RbpConnectionCoordinator
                 var flight = new HeartbeatFlight(
                     fence,
                     deadline,
+                    updateReportIds,
                     NewCompletion(),
                     NewCompletion());
                 ObserveLateFault(flight.Observed.Task);

@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using RevAgent.Bridge.Gateway.Dispatch;
 using RevAgent.Bridge.Gateway.Protocol;
 using RevAgent.Bridge.Gateway.Storage;
+using RevAgent.Bridge.Bootstrap.Updates;
 
 namespace RevAgent.Bridge.Gateway.Connection;
 
@@ -31,6 +32,7 @@ internal sealed partial class RbpConnectionCoordinator
     private readonly IRbpRandomSource _random;
     private readonly RbpConnectionCoordinatorOptions _options;
     private readonly RbpUuidV7 _identifiers;
+    private readonly BridgeUpdateReportStore? _updateReports;
 
     /// <summary>
     /// Required. A coordinator that accepts sessions and receives <c>invoke</c>
@@ -133,7 +135,8 @@ internal sealed partial class RbpConnectionCoordinator
         Func<CancellationToken, Task>? afterRecoveryCarrierWriteBeforeAck = null,
         RbpConformanceOmittedOriginObservation? omittedOriginObservation = null,
         IRbpRecoveryCarrierObservationSink? recoveryCarrierObservationSink = null,
-        IRbpReconnectObservationSink? reconnectObservationSink = null)
+        IRbpReconnectObservationSink? reconnectObservationSink = null,
+        BridgeUpdateReportStore? updateReports = null)
     {
         _batchCoordinator = batchCoordinator;
         _carrierProducer = carrierProducer;
@@ -157,6 +160,7 @@ internal sealed partial class RbpConnectionCoordinator
             RbpRecoveryCarrierObservationSink.None;
         _reconnectObservationSink = reconnectObservationSink ??
             RbpReconnectObservationSink.None;
+        _updateReports = updateReports;
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _options = options ??
             throw new ArgumentNullException(nameof(options));

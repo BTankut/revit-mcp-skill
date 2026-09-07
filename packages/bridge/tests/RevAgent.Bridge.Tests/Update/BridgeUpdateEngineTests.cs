@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Newtonsoft.Json.Linq;
 using RevAgent.Bridge.Bootstrap;
+using RevAgent.Bridge.Bootstrap.Updates;
 using RevAgent.Bridge.Host.Hosting;
 using RevAgent.Bridge.Host.Update;
 using RevAgent.Contracts.Signing;
@@ -60,6 +61,15 @@ public sealed class BridgeUpdateEngineTests
         Assert.Equal(2, state.HighestAcceptedReleaseSequence);
         Assert.Equal("1.0.0", state.ActiveVersion);
         Assert.Contains("2.0.0", state.QuarantinedVersions.Keys);
+        IReadOnlyList<BridgeUpdateReport> reports = await fixture.Reports.ReadPendingAsync(
+            CancellationToken.None);
+        Assert.Contains(reports, report => report.State == BridgeUpdateReportStates.Staged);
+        Assert.Contains(reports, report => report.State == BridgeUpdateReportStates.Deferred);
+        Assert.Contains(reports, report =>
+            report.State == BridgeUpdateReportStates.Applied &&
+            report.Reason == "addin_applied_after_revit_close");
+        Assert.Contains(reports, report => report.State == BridgeUpdateReportStates.Rollback);
+        Assert.Contains(reports, report => report.State == BridgeUpdateReportStates.Quarantined);
 
         BridgeUpdateRejectedException quarantined = await Assert.ThrowsAsync<BridgeUpdateRejectedException>(
             () => fixture.Engine.ApplyAsync(
@@ -156,12 +166,32 @@ public sealed class BridgeUpdateEngineTests
         Assert.Equal(BridgeUpdateDisposition.AlreadyCurrent, second.Disposition);
         Assert.False(second.BridgeApplied);
         Assert.Equal(reads, fixture.Artifacts.OpenCount);
+
+        BridgeUpdateRejectedException contentRebind =
+            await Assert.ThrowsAsync<BridgeUpdateRejectedException>(
+                () => fixture.Engine.ApplyAsync(
+                    fixture.Release(
+                        "2.0.0",
+                        sequence: 2,
+                        bridgeMarker: "changed-component"),
+                    CancellationToken.None));
+        Assert.Equal("release_content_rebind", contentRebind.Code);
+
+        BridgeUpdateRejectedException resequence =
+            await Assert.ThrowsAsync<BridgeUpdateRejectedException>(
+                () => fixture.Engine.ApplyAsync(
+                    fixture.Release("2.0.0", sequence: 3),
+                    CancellationToken.None));
+        Assert.Equal("active_version_resequence", resequence.Code);
     }
 
     [Fact]
     public async Task ExactPendingReleaseCanResumeButSequenceCannotBeRebound()
     {
         using var fixture = new UpdateFixture();
+        SignedBridgeUpdate pending = fixture.Release("2.0.0", sequence: 2);
+        string pendingDigest = "sha256:" +
+            pending.SignatureEnvelope.Value<string>("contentSha256")!.ToLowerInvariant();
         await fixture.State.MutateAsync(
             state => state with
             {
@@ -172,11 +202,12 @@ public sealed class BridgeUpdateEngineTests
                 HighestAcceptedReleaseSequence = 2,
                 PendingReleaseVersion = "2.0.0",
                 PendingReleaseSequence = 2,
+                PendingManifestDigest = pendingDigest,
             },
             CancellationToken.None);
 
         BridgeUpdateResult resumed = await fixture.Engine.ApplyAsync(
-            fixture.Release("2.0.0", sequence: 2),
+            pending,
             CancellationToken.None);
         Assert.Equal(BridgeUpdateDisposition.Applied, resumed.Disposition);
 
@@ -185,6 +216,49 @@ public sealed class BridgeUpdateEngineTests
                 fixture.Release("2.1.0", sequence: 2),
                 CancellationToken.None));
         Assert.Equal("release_sequence_reuse", rebound.Code);
+    }
+
+    [Theory]
+    [InlineData("device-1", 41)]
+    [InlineData("NET01", 65)]
+    [InlineData("pilot-alpha", 9)]
+    [InlineData("00000000-0000-0000-0000-000000000001", 82)]
+    [InlineData("revagent-canary-17", 91)]
+    public void FullSha256RolloutModuloMatchesGoldenVectors(
+        string deviceId,
+        int bucket)
+    {
+        Assert.False(BridgeUpdateEngine.IsSelected(deviceId, 1, bucket));
+        Assert.True(BridgeUpdateEngine.IsSelected(deviceId, 1, bucket + 1));
+    }
+
+    [Fact]
+    public async Task InterruptedResumeRefusesChangedSignedContent()
+    {
+        using var fixture = new UpdateFixture();
+        SignedBridgeUpdate accepted = fixture.Release("2.0.0", sequence: 2);
+        string digest = "sha256:" +
+            accepted.SignatureEnvelope.Value<string>("contentSha256")!.ToLowerInvariant();
+        await fixture.State.MutateAsync(
+            state => state with
+            {
+                TenantBinding = "tenant-a",
+                DeviceId = "device-1",
+                AuthenticatedSessionId = "session-1",
+                ActiveVersion = "1.0.0",
+                HighestAcceptedReleaseSequence = 2,
+                PendingReleaseVersion = "2.0.0",
+                PendingReleaseSequence = 2,
+                PendingManifestDigest = digest,
+            },
+            CancellationToken.None);
+
+        BridgeUpdateRejectedException changed =
+            await Assert.ThrowsAsync<BridgeUpdateRejectedException>(
+                () => fixture.Engine.ApplyAsync(
+                    fixture.Release("2.0.0", sequence: 2, notes: "changed"),
+                    CancellationToken.None));
+        Assert.Equal("release_content_rebind", changed.Code);
     }
 
     [Fact]
@@ -248,6 +322,7 @@ public sealed class BridgeUpdateEngineTests
             File.WriteAllText(Layout.WorkerExecutablePath, "v1-worker");
             File.WriteAllText(AddinPayloadPath, "v1-addin");
             State = new BridgeUpdateStateStore(Layout);
+            Reports = new BridgeUpdateReportStore(Layout);
             Revit = new MutableRevitProbe();
             Artifacts = new FixtureArtifactSource();
             TrustedPublicKeyRing keys = TrustedPublicKeyRing.Create(
@@ -258,15 +333,18 @@ public sealed class BridgeUpdateEngineTests
                 keys,
                 Artifacts,
                 Revit,
-                "1.0.0");
+                "1.0.0",
+                reports: Reports);
             Rollback = new CrashLoopRollbackController(
                 Layout,
                 State,
-                Revit);
+                Revit,
+                reports: Reports);
         }
 
         internal BridgeInstallLayout Layout { get; }
         internal BridgeUpdateStateStore State { get; }
+        internal BridgeUpdateReportStore Reports { get; }
         internal MutableRevitProbe Revit { get; }
         internal FixtureArtifactSource Artifacts { get; }
         internal BridgeUpdateEngine Engine { get; }
@@ -299,9 +377,13 @@ public sealed class BridgeUpdateEngineTests
             long sequence,
             int rolloutPercent = 100,
             int deviceRing = 1,
-            bool corruptSignedBridgeHash = false)
+            bool corruptSignedBridgeHash = false,
+            string notes = "EU-21 fixture",
+            string bridgeMarker = "")
         {
-            byte[] bridge = Zip((BridgeInstallLayout.WorkerExecutableName, $"v{version[0]}-worker"));
+            byte[] bridge = Zip((
+                BridgeInstallLayout.WorkerExecutableName,
+                $"v{version[0]}-worker{bridgeMarker}"));
             byte[] addin = Zip(("addin.txt", $"v{version[0]}-addin"));
             Uri bridgeUrl = new($"https://updates.example.test/{version}/bridge.zip");
             Uri addinUrl = new($"https://updates.example.test/{version}/addin.zip");
@@ -324,7 +406,7 @@ public sealed class BridgeUpdateEngineTests
                     Component("addin", version, addinUrl, addin, false)),
                 ["rolloutPercent"] = rolloutPercent,
                 ["minSupportedVersion"] = "1.0.0",
-                ["notes"] = "EU-21 fixture",
+                ["notes"] = notes,
             };
             return new SignedBridgeUpdate(
                 manifest,

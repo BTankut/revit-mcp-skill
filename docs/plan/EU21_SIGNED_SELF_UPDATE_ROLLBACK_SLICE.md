@@ -46,6 +46,10 @@ compatible. The mapping is explicit: `staged` becomes canonical `started`,
 
 ## Local acceptance evidence
 
+Historical evidence for head `68edf583`; final review marked this candidate
+BLOCKING. The results below are retained as chronology and do not establish the
+current acceptance claim. The superseding composed evidence follows.
+
 Recorded 2026-09-07 in the isolated EU-21 worktree. The tests use generated
 RSA keys, HTTPS fixture responses, redirected install/state/add-in roots, and
 fixture-owned worker processes. They do not use a production key, service,
@@ -94,3 +98,43 @@ Park List:
 - Gateway rollout freeze/alert automation after a reported quarantine belongs
   to the Gateway follow-up identified by P-UPD-4; local rollback does not wait
   on it.
+
+## Superseding blocking-review evidence
+
+The rework closes every blocker recorded for `68edf583`:
+
+| Review blocker | Superseding evidence |
+|---|---|
+| Pre-CONNECT / pre-READY failures bypass rollback | Three consecutive failures before CONNECT and before READY each restore the previous worker and keep the host alive; explicit caller cancellation leaves the crash counter unchanged |
+| Rollout used only four SHA-256 bytes | Five nontrivial golden vectors pin full unsigned SHA-256 modulo 100 buckets: `device-1=41`, `NET01=65`, `pilot-alpha=9`, UUID fixture `=82`, and `revagent-canary-17=91` |
+| Sequence lacked signed-content binding | Durable state now binds accepted and pending sequence/version to `sha256:<verified canonical manifest>`; same sequence/version with changed component bytes, changed interrupted content, sequence rebinding, and higher sequence reuse of the active version all refuse |
+| No authenticated Gateway reporting | Host stores deterministic bounded transition reports; the worker sends at most 16 / 64 KiB through additive heartbeat `update_reports`; Gateway derives tenant/device/connection authority from the authenticated session, maps into strict canonical `bridge.update`, deduplicates replay, and acks only after event persistence; failed persistence and device substitution return no ack |
+| Matrix was manually seeded and split | One composed test invokes the real redirected installer with a generated test key, loads its installed trusted-key/output layout, performs an authenticated poll and artifact fetch, restarts the supervised worker, defers the loaded add-in, applies it after close, injects pre-CONNECT + pre-READY + runtime failures, restores v1, quarantines v2, emits all six report states, and removes rows only through the production heartbeat ack helper |
+
+The composed matrix uses an in-process HTTPS message handler and fixture worker
+process implementation. It executes the real installer script, poller, update
+engine, version resolver, supervisor/control-pipe lifecycle, crash controller,
+add-in applier, durable report store, heartbeat serializer, and ack deletion.
+The separate Gateway-focused test executes the actual
+`GatewayBridgeSessionAuthority` and canonical in-memory event persistence; it
+proves the six-state mapping, idempotent replay, persistence-before-ack,
+device/tenant/connection authority, old-peer compatibility, and report caps.
+These two tests share the production report contract but do not open a real
+network socket or touch a machine service/Revit installation.
+
+Final focused results:
+
+- Bridge solution build: 0 warnings, 0 errors.
+- Signature compatibility: 38 passed, 0 failed.
+- Update/host/layout/heartbeat report tests: 26 passed, 0 failed.
+- Composed installer-to-rollback matrix: 1 passed, 0 failed.
+- Gateway TypeScript build: passed.
+- Authenticated Gateway update reporting: 3 passed, 0 failed.
+
+Raw rework logs remain untracked under
+`artifacts/eu21-signed-self-update-rollback/`; the earlier failed logs are
+retained alongside the final green logs.
+
+Total actual from the first scope record through rework completion: 1.93 hours.
+Against the 6–8 hour forecast, variance is 4.07–6.07 hours under forecast.
+Production signing material and M6 owner acceptance remain the only true gates.

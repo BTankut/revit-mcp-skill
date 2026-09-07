@@ -12,10 +12,12 @@ internal sealed record BridgeUpdateState
     public string ActiveVersion { get; init; } = string.Empty;
     public string? PreviousVersion { get; init; }
     public long HighestAcceptedReleaseSequence { get; init; }
+    public string? AcceptedManifestDigest { get; init; }
     public string? PendingAddinVersion { get; init; }
     public string? PendingAddinPath { get; init; }
     public string? PendingReleaseVersion { get; init; }
     public long? PendingReleaseSequence { get; init; }
+    public string? PendingManifestDigest { get; init; }
     public DateTimeOffset? VersionActivatedAtUtc { get; init; }
     public IReadOnlyList<DateTimeOffset> AbnormalExitTimesUtc { get; init; } = [];
     public IReadOnlyDictionary<string, DateTimeOffset> QuarantinedVersions { get; init; } =
@@ -176,10 +178,39 @@ internal sealed class BridgeUpdateStateStore
                 "invalid_update_state",
                 "Pending release sequence has no version binding.");
         }
+        ValidateOptionalDigest(state.AcceptedManifestDigest, "accepted");
+        ValidateOptionalDigest(state.PendingManifestDigest, "pending");
+        if (state.HighestAcceptedReleaseSequence > 0 &&
+            state.AcceptedManifestDigest is null &&
+            state.PendingManifestDigest is null)
+        {
+            throw new BridgeUpdateRejectedException(
+                "invalid_update_state",
+                "Accepted release sequence has no verified manifest binding.");
+        }
+        if ((state.PendingReleaseVersion is null) !=
+            (state.PendingManifestDigest is null))
+        {
+            throw new BridgeUpdateRejectedException(
+                "invalid_update_state",
+                "Pending release manifest binding is incomplete.");
+        }
 
         foreach (string version in state.QuarantinedVersions.Keys)
         {
             UpdatePathPolicy.ValidateVersion(version);
+        }
+    }
+
+    private static void ValidateOptionalDigest(string? digest, string label)
+    {
+        if (digest is not null &&
+            (digest.Length != 71 || !digest.StartsWith("sha256:", StringComparison.Ordinal) ||
+                !digest.AsSpan(7).ToArray().All(Uri.IsHexDigit)))
+        {
+            throw new BridgeUpdateRejectedException(
+                "invalid_update_state",
+                $"The {label} manifest digest is invalid.");
         }
     }
 }

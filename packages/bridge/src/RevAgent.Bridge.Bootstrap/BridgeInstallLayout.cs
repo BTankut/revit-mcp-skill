@@ -91,6 +91,9 @@ internal sealed record BridgeInstallLayout(string InstallRoot, string StateRoot)
     internal string UpdateStatePath =>
         Path.Combine(UpdateRoot, "state.json");
 
+    internal string UpdateReportPendingRoot =>
+        Path.Combine(UpdateRoot, "reports", "pending");
+
     internal string CurrentVersionPointerPath =>
         Path.Combine(UpdateRoot, "current.version");
 

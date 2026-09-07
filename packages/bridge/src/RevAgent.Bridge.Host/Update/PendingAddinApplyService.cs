@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using RevAgent.Bridge.Bootstrap;
 using RevAgent.Bridge.Bootstrap.Logging;
+using RevAgent.Bridge.Bootstrap.Updates;
 
 namespace RevAgent.Bridge.Host.Update;
 
@@ -9,15 +10,21 @@ internal sealed class PendingAddinApplier
     private readonly BridgeInstallLayout _layout;
     private readonly BridgeUpdateStateStore _stateStore;
     private readonly IRevitProcessProbe _revit;
+    private readonly BridgeUpdateReportStore? _reports;
+    private readonly TimeProvider _timeProvider;
 
     internal PendingAddinApplier(
         BridgeInstallLayout layout,
         BridgeUpdateStateStore stateStore,
-        IRevitProcessProbe revit)
+        IRevitProcessProbe revit,
+        BridgeUpdateReportStore? reports = null,
+        TimeProvider? timeProvider = null)
     {
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _revit = revit ?? throw new ArgumentNullException(nameof(revit));
+        _reports = reports;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     internal async Task<bool> TryApplyAsync(CancellationToken cancellationToken)
@@ -51,6 +58,20 @@ internal sealed class PendingAddinApplier
                 PendingAddinPath = null,
             },
             cancellationToken).ConfigureAwait(false);
+        if (_reports is not null && state.AcceptedManifestDigest is not null)
+        {
+            _ = await _reports.AppendAsync(
+                state.DeviceId,
+                state.PreviousVersion ?? state.ActiveVersion,
+                state.PendingAddinVersion,
+                state.HighestAcceptedReleaseSequence,
+                state.AcceptedManifestDigest,
+                BridgeUpdateReportStates.Applied,
+                "addin_applied_after_revit_close",
+                error: null,
+                _timeProvider.GetUtcNow(),
+                cancellationToken).ConfigureAwait(false);
+        }
         return true;
     }
 }

@@ -1,4 +1,5 @@
 using RevAgent.Bridge.Bootstrap;
+using RevAgent.Bridge.Bootstrap.Updates;
 
 namespace RevAgent.Bridge.Host.Update;
 
@@ -11,17 +12,20 @@ internal sealed class CrashLoopRollbackController
     private readonly BridgeUpdateStateStore _stateStore;
     private readonly IRevitProcessProbe _revit;
     private readonly TimeProvider _timeProvider;
+    private readonly BridgeUpdateReportStore? _reports;
 
     internal CrashLoopRollbackController(
         BridgeInstallLayout layout,
         BridgeUpdateStateStore stateStore,
         IRevitProcessProbe revit,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        BridgeUpdateReportStore? reports = null)
     {
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _revit = revit ?? throw new ArgumentNullException(nameof(revit));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _reports = reports;
     }
 
     internal async Task<CrashRollbackResult> RecordUnexpectedExitAsync(
@@ -101,6 +105,34 @@ internal sealed class CrashLoopRollbackController
                 PendingAddinPath = pendingAddinPath,
             },
             cancellationToken).ConfigureAwait(false);
+
+        if (_reports is not null)
+        {
+            string digest = state.AcceptedManifestDigest ??
+                "sha256:" + new string('0', 64);
+            _ = await _reports.AppendAsync(
+                state.DeviceId,
+                badVersion,
+                restoredVersion,
+                state.HighestAcceptedReleaseSequence,
+                digest,
+                BridgeUpdateReportStates.Rollback,
+                "crash_loop_rollback",
+                error: null,
+                now,
+                cancellationToken).ConfigureAwait(false);
+            _ = await _reports.AppendAsync(
+                state.DeviceId,
+                badVersion,
+                restoredVersion,
+                state.HighestAcceptedReleaseSequence,
+                digest,
+                BridgeUpdateReportStates.Quarantined,
+                "bad_version_quarantined",
+                error: null,
+                now,
+                cancellationToken).ConfigureAwait(false);
+        }
 
         bool addinDeferred = hasRestoredAddin;
         if (hasRestoredAddin && !_revit.IsRevitRunning())

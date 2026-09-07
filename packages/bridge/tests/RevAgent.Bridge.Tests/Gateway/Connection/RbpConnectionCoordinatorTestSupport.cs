@@ -9,6 +9,8 @@ using RevAgent.Bridge.Gateway.Connection;
 using RevAgent.Bridge.Gateway.Dispatch;
 using RevAgent.Bridge.Gateway.Protocol;
 using RevAgent.Bridge.Gateway.Storage;
+using RevAgent.Bridge.Bootstrap;
+using RevAgent.Bridge.Bootstrap.Updates;
 using RevAgent.Bridge.Tests.Gateway.Storage;
 
 namespace RevAgent.Bridge.Tests.Gateway.Connection;
@@ -30,7 +32,8 @@ public sealed partial class RbpConnectionCoordinatorTests
         IRbpRecoveryCarrierObservationSink?
             recoveryCarrierObservationSink = null,
         RbpHelloProfile? helloProfile = null,
-        RbpDocContextWatcher? docContextWatcher = null) =>
+        RbpDocContextWatcher? docContextWatcher = null,
+        BridgeUpdateReportStore? updateReports = null) =>
         new(
             factory,
             store,
@@ -52,7 +55,8 @@ public sealed partial class RbpConnectionCoordinatorTests
                 onConnectionFailureObservation,
             recoveryCarrierObservationSink:
                 recoveryCarrierObservationSink,
-            docContextWatcher: docContextWatcher);
+            docContextWatcher: docContextWatcher,
+            updateReports: updateReports);
 
     private static RbpJournalStore OpenStore(
         RbpJournalTestDirectory directory,
@@ -717,14 +721,22 @@ public sealed partial class RbpConnectionCoordinatorTests
                     ["seq"] = 0,
                 })
                 .ToArray();
+            var payload = new Dictionary<string, object?>
+            {
+                ["server_time"] = _clock.UtcNow.ToString("O"),
+                ["acks"] = acknowledgements,
+            };
+            if (request.TryGetProperty("update_reports", out JsonElement reports))
+            {
+                payload["update_report_acks"] = reports
+                    .EnumerateArray()
+                    .Select(item => item.GetProperty("report_id").GetString())
+                    .ToArray();
+            }
+
             return Control(
                 "heartbeat_ack",
-                JsonSerializer.SerializeToElement(
-                    new Dictionary<string, object?>
-                    {
-                        ["server_time"] = _clock.UtcNow.ToString("O"),
-                        ["acks"] = acknowledgements,
-                    }));
+                JsonSerializer.SerializeToElement(payload));
         }
 
         private RbpEnvelope Control(

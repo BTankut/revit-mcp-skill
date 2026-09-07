@@ -2,11 +2,63 @@ using RevAgent.Bridge.Gateway.Connection;
 using RevAgent.Bridge.Gateway.Protocol;
 using RevAgent.Bridge.Gateway.Storage;
 using RevAgent.Bridge.Tests.Gateway.Storage;
+using RevAgent.Bridge.Bootstrap;
+using RevAgent.Bridge.Bootstrap.Updates;
+using System.Text.Json;
 
 namespace RevAgent.Bridge.Tests.Gateway.Connection;
 
 public sealed partial class RbpConnectionCoordinatorTests
 {
+    [Fact]
+    public async Task UpdateReportsRemainUntilMatchingHeartbeatAck()
+    {
+        using var directory = new RbpJournalTestDirectory();
+        var clock = new ManualCoordinatorClock();
+        await using RbpJournalStore store = OpenStore(directory, clock);
+        var layout = new BridgeInstallLayout(
+            Path.Combine(directory.Path, "install", "Bridge"),
+            Path.Combine(directory.Path, "state"));
+        var reports = new BridgeUpdateReportStore(layout);
+        BridgeUpdateReport pending = await reports.AppendAsync(
+            "10000000-0000-4000-8000-000000000003",
+            "1.0.0",
+            "2.0.0",
+            2,
+            "sha256:" + new string('a', 64),
+            BridgeUpdateReportStates.Staged,
+            "components_verified_and_staged",
+            null,
+            clock.UtcNow,
+            CancellationToken.None);
+        var responder = new ScriptedGatewayResponder(clock);
+        var cycle = new FakeConnectionCycle(responder.Respond);
+        var coordinator = Coordinator(
+            new FakeConnectionCycleFactory(cycle),
+            store,
+            new MutableSessionCatalog(),
+            clock,
+            updateReports: reports);
+        using var stop = new CancellationTokenSource();
+
+        Task run = coordinator.RunAsync(stop.Token);
+        await EventuallyAsync(() => coordinator.GetSnapshot().HasActiveConnection);
+        Assert.Single(await reports.ReadPendingAsync(CancellationToken.None));
+        clock.Advance(TimeSpan.FromSeconds(15));
+        await EventuallyAsync(async () =>
+            (await reports.ReadPendingAsync(CancellationToken.None)).Count == 0);
+
+        RbpEnvelope heartbeat = Assert.Single(
+            cycle.Sent,
+            item => item.Type == "heartbeat");
+        JsonElement row = Assert.Single(
+            heartbeat.Payload.GetProperty("update_reports").EnumerateArray());
+        Assert.Equal(pending.ReportId, row.GetProperty("report_id").GetString());
+
+        stop.Cancel();
+        await run.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
     [Fact]
     public async Task HeartbeatDeadlineStartsBeforeBlockedTransportSend()
     {

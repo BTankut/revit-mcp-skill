@@ -1,9 +1,9 @@
-using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using Newtonsoft.Json.Linq;
 using RevAgent.Bridge.Bootstrap;
+using RevAgent.Bridge.Bootstrap.Updates;
 using RevAgent.Contracts.Signing;
 
 namespace RevAgent.Bridge.Host.Update;
@@ -19,6 +19,7 @@ internal sealed class BridgeUpdateEngine
     private readonly PendingAddinApplier _addinApplier;
     private readonly string _installedVersion;
     private readonly TimeProvider _timeProvider;
+    private readonly BridgeUpdateReportStore? _reports;
 
     internal BridgeUpdateEngine(
         BridgeInstallLayout layout,
@@ -27,17 +28,24 @@ internal sealed class BridgeUpdateEngine
         IBridgeUpdateArtifactSource artifacts,
         IRevitProcessProbe revit,
         string installedVersion,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        BridgeUpdateReportStore? reports = null)
     {
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _trustedKeys = trustedKeys ?? throw new ArgumentNullException(nameof(trustedKeys));
         _artifacts = artifacts ?? throw new ArgumentNullException(nameof(artifacts));
         ArgumentNullException.ThrowIfNull(revit);
-        _addinApplier = new PendingAddinApplier(layout, stateStore, revit);
+        _addinApplier = new PendingAddinApplier(
+            layout,
+            stateStore,
+            revit,
+            reports,
+            timeProvider);
         UpdatePathPolicy.ValidateVersion(installedVersion);
         _installedVersion = installedVersion;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _reports = reports;
     }
 
     internal async Task<BridgeUpdateResult> ApplyAsync(
@@ -62,6 +70,7 @@ internal sealed class BridgeUpdateEngine
         }
 
         BridgeUpdateManifest manifest = BridgeUpdateManifestParser.Parse(update.Manifest);
+        string manifestDigest = "sha256:" + signature.ContentSha256.ToLowerInvariant();
         BridgeUpdateState state = await EnsureBoundStateAsync(
             update.Principal,
             cancellationToken).ConfigureAwait(false);
@@ -83,6 +92,15 @@ internal sealed class BridgeUpdateEngine
         {
             if (string.Equals(state.ActiveVersion, manifest.Version, StringComparison.Ordinal))
             {
+                if (!string.Equals(
+                        state.AcceptedManifestDigest,
+                        manifestDigest,
+                        StringComparison.Ordinal))
+                {
+                    throw Reject(
+                        "release_content_rebind",
+                        "An accepted release cannot be rebound to changed signed content.");
+                }
                 bool addinApplied = await TryApplyPendingAddinAsync(cancellationToken)
                     .ConfigureAwait(false);
                 BridgeUpdateState current = await _stateStore.ReadAsync(cancellationToken)
@@ -109,12 +127,38 @@ internal sealed class BridgeUpdateEngine
                     "release_sequence_reuse",
                     "An accepted releaseSequence cannot identify a different version.");
             }
+            if (!string.Equals(
+                    state.PendingManifestDigest,
+                    manifestDigest,
+                    StringComparison.Ordinal))
+            {
+                throw Reject(
+                    "release_content_rebind",
+                    "Interrupted release content does not match its accepted manifest digest.");
+            }
 
             // Resume the exact accepted transaction after an interrupted apply.
         }
 
+        if (manifest.ReleaseSequence > state.HighestAcceptedReleaseSequence &&
+            string.Equals(state.ActiveVersion, manifest.Version, StringComparison.Ordinal))
+        {
+            throw Reject(
+                "active_version_resequence",
+                "A higher releaseSequence cannot reuse the active version identity.");
+        }
+
         if (!IsSelected(update.Principal.DeviceId, update.DeviceRing, manifest.RolloutPercent))
         {
+            await ReportAsync(
+                update.Principal.DeviceId,
+                state.ActiveVersion,
+                manifest.Version,
+                manifest.ReleaseSequence,
+                manifestDigest,
+                BridgeUpdateReportStates.Refused,
+                "rollout_not_selected",
+                cancellationToken).ConfigureAwait(false);
             return new BridgeUpdateResult(
                 BridgeUpdateDisposition.NotSelected,
                 manifest.Version,
@@ -158,6 +202,16 @@ internal sealed class BridgeUpdateEngine
                 ? _installedVersion
                 : state.ActiveVersion;
 
+            await ReportAsync(
+                update.Principal.DeviceId,
+                previousVersion,
+                manifest.Version,
+                manifest.ReleaseSequence,
+                manifestDigest,
+                BridgeUpdateReportStates.Staged,
+                "components_verified_and_staged",
+                cancellationToken).ConfigureAwait(false);
+
             // Persist sequence acceptance before changing the executable pointer.
             await _stateStore.MutateAsync(
                 current => current with
@@ -168,6 +222,7 @@ internal sealed class BridgeUpdateEngine
                     HighestAcceptedReleaseSequence = manifest.ReleaseSequence,
                     PendingReleaseVersion = manifest.Version,
                     PendingReleaseSequence = manifest.ReleaseSequence,
+                    PendingManifestDigest = manifestDigest,
                 },
                 cancellationToken).ConfigureAwait(false);
 
@@ -226,6 +281,8 @@ internal sealed class BridgeUpdateEngine
                     PendingAddinPath = pendingAddinPath,
                     PendingReleaseVersion = null,
                     PendingReleaseSequence = null,
+                    PendingManifestDigest = null,
+                    AcceptedManifestDigest = manifestDigest,
                 },
                 cancellationToken).ConfigureAwait(false);
 
@@ -234,6 +291,17 @@ internal sealed class BridgeUpdateEngine
             BridgeUpdateState finalState = await _stateStore.ReadAsync(cancellationToken)
                 .ConfigureAwait(false);
             bool deferred = finalState.PendingAddinVersion is not null;
+            await ReportAsync(
+                update.Principal.DeviceId,
+                previousVersion,
+                manifest.Version,
+                manifest.ReleaseSequence,
+                manifestDigest,
+                deferred
+                    ? BridgeUpdateReportStates.Deferred
+                    : BridgeUpdateReportStates.Applied,
+                deferred ? "deferred_for_revit_close" : "bridge_and_addin_applied",
+                cancellationToken).ConfigureAwait(false);
             return new BridgeUpdateResult(
                 deferred
                     ? BridgeUpdateDisposition.DeferredForRevitClose
@@ -249,6 +317,34 @@ internal sealed class BridgeUpdateEngine
         {
             DeleteOwnedDirectory(releaseStage, _layout.UpdateStagingRoot);
         }
+    }
+
+    private async Task ReportAsync(
+        string deviceId,
+        string fromVersion,
+        string toVersion,
+        long releaseSequence,
+        string manifestDigest,
+        string state,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (_reports is null)
+        {
+            return;
+        }
+
+        _ = await _reports.AppendAsync(
+            deviceId,
+            fromVersion,
+            toVersion,
+            releaseSequence,
+            manifestDigest,
+            state,
+            reason,
+            error: null,
+            _timeProvider.GetUtcNow(),
+            cancellationToken).ConfigureAwait(false);
     }
 
     internal async Task<bool> TryApplyPendingAddinAsync(
@@ -271,8 +367,13 @@ internal sealed class BridgeUpdateEngine
         }
 
         byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(deviceId));
-        uint bucketSeed = BinaryPrimitives.ReadUInt32BigEndian(digest);
-        return bucketSeed % 100 < rolloutPercent;
+        int bucket = 0;
+        foreach (byte value in digest)
+        {
+            bucket = ((bucket * 256) + value) % 100;
+        }
+
+        return bucket < rolloutPercent;
     }
 
     private async Task<BridgeUpdateState> EnsureBoundStateAsync(
