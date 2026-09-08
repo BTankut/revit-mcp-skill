@@ -550,6 +550,25 @@ export {
 } from "./oidcIdentity.js";
 export { createAuthenticatedTenantReadNorthMcp } from "./authenticatedTenantRead.js";
 export {
+  BRIDGE_MANIFEST_CANONICALIZATION,
+  BRIDGE_MANIFEST_SIGNED_OBJECT,
+  bridgeManifestDigest,
+  parseBridgeManifestTrustedKeys,
+  validateBridgeUpdateManifest,
+  verifyBridgeManifestSignature,
+  type BridgeManifestSignatureEnvelope,
+  type BridgeManifestTrustedKey,
+} from "./bridgeManifestSignature.js";
+export {
+  BridgeReleaseObjectError,
+  FilesystemBridgeReleaseObjectStore,
+} from "./bridgeReleaseObjectStore.js";
+export {
+  createBridgeUpdateEndpoint,
+  type BridgeUpdateEndpointOptions,
+  type BridgeUpdateReleaseReader,
+} from "./bridgeUpdateEndpoint.js";
+export {
   M5_ACTIVE_REVOKE_BOUND_MS,
   M5_ENROLLMENT_ENTITLEMENT_CONTRACT_VERSION,
   M5EnrollmentEntitlementControlPlane,

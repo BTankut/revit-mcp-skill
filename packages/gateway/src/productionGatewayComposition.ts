@@ -15,6 +15,11 @@ import { buildNorthFirstSliceCallableRegistry, M2_NORTH_FIRST_SLICE_CALLABLE } f
 import { GatewayDispatcher, type GatewayExecutor } from "./dispatch.js";
 import { GatewayRecoveryAuthority } from "./recoveryAuthority.js";
 import type { AuthContext, EntitlementPort } from "./authContext.js";
+import { parseBridgeManifestTrustedKeys, verifyBridgeManifestSignature } from "./bridgeManifestSignature.js";
+import { FilesystemBridgeReleaseObjectStore } from "./bridgeReleaseObjectStore.js";
+import { createBridgeUpdateEndpoint } from "./bridgeUpdateEndpoint.js";
+import { PostgresEu12DataStore } from "./postgresEu12DataStore.js";
+import type { ResultObjectStore } from "./resultReferenceStore.js";
 
 /** Actual image composition. No fixture ports or configurable adapter factories
  * enter this graph. Read-only EU-20 catalog; further tools require their own
@@ -85,6 +90,40 @@ export async function composeProductionGateway(
     eventSource: { component: "revagent-gateway", version: "eu20-production/v1", instance: "north-mcp" },
     recoveryAuthority: recovery,
   });
+  const bridgeUpdateEnabled = env.BRIDGE_UPDATE_DELIVERY_ENABLED === "true";
+  let bridgeUpdate: ReturnType<typeof createBridgeUpdateEndpoint> | null = null;
+  let bridgeUpdateReleases: PostgresEu12DataStore | null = null;
+  if (bridgeUpdateEnabled) {
+    const trustedKeyPath = env.BRIDGE_UPDATE_TRUSTED_KEYS_FILE?.trim();
+    if (!trustedKeyPath) throw new Error("production_bridge_update_trust_incomplete");
+    const trustedKeys = parseBridgeManifestTrustedKeys(JSON.parse(await readFile(trustedKeyPath, "utf8")));
+    const unavailableObjects: ResultObjectStore = Object.freeze({
+      async put() { throw new Error("runtime release reader cannot write result objects"); },
+      async get() { return null; },
+      async delete() { throw new Error("runtime release reader cannot delete result objects"); },
+    });
+    bridgeUpdateReleases = new PostgresEu12DataStore({
+      databaseUrl,
+      objects: unavailableObjects,
+      signatureVerifier: Object.freeze({ verify() { return false; } }),
+      pinnedSigningKeyIds: Object.keys(trustedKeys),
+      bridgeManifestVerifier: input => verifyBridgeManifestSignature({
+        manifest: input.manifest,
+        envelope: input.signatureEnvelope,
+        trustedKeys,
+      }),
+    });
+    bridgeUpdate = createBridgeUpdateEndpoint({
+      identity: m5.identity,
+      releases: bridgeUpdateReleases,
+      objects: new FilesystemBridgeReleaseObjectStore(config.objectStore.root),
+      verifyManifest: input => verifyBridgeManifestSignature({
+        manifest: input.manifest,
+        envelope: input.signatureEnvelope,
+        trustedKeys,
+      }),
+    });
+  }
   return {
     config,
     ...(tls === undefined ? {} : { tls }),
@@ -107,6 +146,12 @@ export async function composeProductionGateway(
       requestState: { key: createHmac("sha256", pepper).update("revagent/north-request-state/v1").digest() },
       resourceMetadataUrl: new URL("/.well-known/oauth-protected-resource/mcp", config.publicUrl),
     },
-    beforeListen: app => { app.addHook("onClose", async () => m5.repository.close()); },
+    beforeListen: app => {
+      bridgeUpdate?.mount(app);
+      app.addHook("onClose", async () => {
+        await bridgeUpdateReleases?.close();
+        await m5.repository.close();
+      });
+    },
   };
 }

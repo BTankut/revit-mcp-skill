@@ -198,6 +198,55 @@ internal sealed class BridgeUpdateEngine
                 extracted.Add(component.Name, extractedPath);
             }
 
+            await using IAsyncDisposable mutation =
+                await _stateStore.AcquireMutationAsync(
+                    "release_commit",
+                    cancellationToken).ConfigureAwait(false);
+            BridgeUpdateState commitState = await _stateStore.ReadAsync(
+                cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(
+                    commitState.TenantBinding,
+                    state.TenantBinding,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    commitState.DeviceId,
+                    state.DeviceId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    commitState.AuthenticatedSessionId,
+                    state.AuthenticatedSessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    commitState.ActiveVersion,
+                    state.ActiveVersion,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    commitState.PreviousVersion,
+                    state.PreviousVersion,
+                    StringComparison.Ordinal) ||
+                commitState.HighestAcceptedReleaseSequence !=
+                    state.HighestAcceptedReleaseSequence ||
+                !string.Equals(
+                    commitState.AcceptedManifestDigest,
+                    state.AcceptedManifestDigest,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    commitState.PendingReleaseVersion,
+                    state.PendingReleaseVersion,
+                    StringComparison.Ordinal) ||
+                commitState.PendingReleaseSequence != state.PendingReleaseSequence ||
+                !string.Equals(
+                    commitState.PendingManifestDigest,
+                    state.PendingManifestDigest,
+                    StringComparison.Ordinal) ||
+                commitState.QuarantinedVersions.ContainsKey(manifest.Version))
+            {
+                throw Reject(
+                    "update_state_changed",
+                    "Update authority changed while signed components were staged.");
+            }
+            state = commitState;
+
             string previousVersion = string.IsNullOrEmpty(state.ActiveVersion)
                 ? _installedVersion
                 : state.ActiveVersion;
@@ -286,6 +335,7 @@ internal sealed class BridgeUpdateEngine
                 },
                 cancellationToken).ConfigureAwait(false);
 
+            await mutation.DisposeAsync().ConfigureAwait(false);
             bool addinApplied = await TryApplyPendingAddinAsync(cancellationToken)
                 .ConfigureAwait(false);
             BridgeUpdateState finalState = await _stateStore.ReadAsync(cancellationToken)
