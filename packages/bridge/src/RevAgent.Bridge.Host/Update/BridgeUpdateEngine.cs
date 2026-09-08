@@ -213,6 +213,10 @@ internal sealed class BridgeUpdateEngine
                     state.DeviceId,
                     StringComparison.Ordinal) ||
                 !string.Equals(
+                    commitState.AuthenticatedSessionId,
+                    state.AuthenticatedSessionId,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
                     commitState.ActiveVersion,
                     state.ActiveVersion,
                     StringComparison.Ordinal) ||
