@@ -32,10 +32,12 @@ product-level lifecycle repair are out of scope.
   fixture builds, locked solution restore, and Release solution build then
   completed without generated-source drift or build errors.
 - No normal-stop assertion failure reproduced locally, so no state-4 or
-  `AttemptTeardownResources.SecondaryFault` was captured. A later detached
-  local test output is retained as incomplete duplicate evidence, not as a
-  green gate.
+  `AttemptTeardownResources.SecondaryFault` was captured. The later foreground
+  suite log contains 1362 passed, 0 failed, and 2 skipped, but its controller
+  did not report a terminal exit status; it is incomplete evidence, not a
+  green gate. A subsequent detached duplicate was terminated during cleanup.
 
 Forecast/actual/variance: forecast was one focused test and one bounded full
 suite. Actual was one focused pass and one setup-invalid full suite; the target
-signature remains unresolved. No deterministic fixture adjustment was proved.
+signature remains unresolved and final full-suite validation remains with the
+protected CI. No deterministic fixture adjustment was proved.
