@@ -35,7 +35,9 @@ $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 if ((Test-Path -LiteralPath $OutputRoot) -or $ReleaseId -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -or
     $Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$' -or
     $MinSupportedVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$' -or
-    $ReleaseSequence -lt 1 -or $HeadSha -notmatch '^[0-9a-f]{40}$' -or $HeadTree -notmatch '^[0-9a-f]{40}$') {
+    $ReleaseSequence -lt 1 -or $HeadSha -notmatch '^[0-9a-f]{40}$' -or $HeadTree -notmatch '^[0-9a-f]{40}$' -or
+    $RevitVersions.Count -eq 0 -or @($RevitVersions | Where-Object { $_ -notmatch '^20[0-9]{2}$' }).Count -ne 0 -or
+    @($RevitVersions | Sort-Object -Unique).Count -ne $RevitVersions.Count) {
     throw 'Bridge update identity, version, Git provenance, or absent output root is invalid.'
 }
 $gateway = [Uri]$GatewayBaseUrl
@@ -95,6 +97,95 @@ function Copy-SourceFreeTree {
     }
 }
 
+function Copy-SourceCommandPayload {
+    param([string]$RepositoryRoot, [string]$AddinRoot, [string[]]$Versions)
+
+    $commandSetFolderName = 'revAgentCommandSet'
+    $commandSetDllFileName = 'revAgentCommandSet.dll'
+    $descriptorSource = Join-Path $RepositoryRoot 'src\revit-plugin\revAgentCommandSet\command.json'
+    if (-not (Test-Path -LiteralPath $descriptorSource -PathType Leaf)) {
+        throw "Command descriptor source was not found: $descriptorSource"
+    }
+    $descriptor = Get-Content -LiteralPath $descriptorSource -Raw | ConvertFrom-Json
+    $descriptorCommands = @($descriptor.commands)
+    if ([string]$descriptor.name -ne $commandSetFolderName -or $descriptorCommands.Count -eq 0 -or
+        @($descriptorCommands | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.commandName) }).Count -ne 0 -or
+        @($descriptorCommands.commandName | Sort-Object -Unique).Count -ne $descriptorCommands.Count) {
+        throw 'Canonical revAgent command descriptor shape is invalid.'
+    }
+    $developer = $descriptor.developer
+    if ($null -eq $developer) {
+        $developer = [pscustomobject]@{ name = 'mcp-servers-for-revit'; email = ''; website = ''; organization = 'mcp-servers-for-revit' }
+    }
+
+    foreach ($revitVersion in $Versions) {
+        $pluginRoot = Join-Path $AddinRoot "$revitVersion\revAgentPlugin"
+        $commandsRoot = Join-Path $pluginRoot 'Commands'
+        $commandSetRoot = Join-Path $commandsRoot $commandSetFolderName
+        $versionRoot = Join-Path $commandSetRoot $revitVersion
+        $commandSetDllSource = Join-Path $RepositoryRoot "src\revit-plugin\revAgentCommandSet\bin\Release\$revitVersion\$commandSetDllFileName"
+        if (-not (Test-Path -LiteralPath $commandSetDllSource -PathType Leaf)) {
+            throw "Command-set build output was not found: $commandSetDllSource"
+        }
+        [void](New-Item -ItemType Directory -Force -Path $versionRoot)
+        Copy-Item -LiteralPath $descriptorSource -Destination (Join-Path $commandSetRoot 'command.json')
+        Copy-Item -LiteralPath $commandSetDllSource -Destination (Join-Path $versionRoot $commandSetDllFileName)
+
+        $registryCommands = foreach ($command in $descriptorCommands) {
+            [pscustomobject][ordered]@{
+                commandName = [string]$command.commandName
+                assemblyPath = "$commandSetFolderName\\$revitVersion\\$commandSetDllFileName"
+                enabled = $true
+                supportedRevitVersions = @($revitVersion)
+                developer = $developer
+                description = [string]$command.description
+            }
+        }
+        $registry = [pscustomobject][ordered]@{ Commands = @($registryCommands) }
+        [IO.File]::WriteAllText(
+            (Join-Path $commandsRoot 'commandRegistry.json'),
+            (($registry | ConvertTo-Json -Depth 10) + "`n"),
+            [Text.UTF8Encoding]::new($false))
+    }
+}
+
+function Assert-AddinCommandPayloadShape {
+    param([string]$AddinRoot, [string[]]$Versions)
+
+    foreach ($revitVersion in $Versions) {
+        $pluginRoot = Join-Path $AddinRoot "$revitVersion\revAgentPlugin"
+        $commandsRoot = Join-Path $pluginRoot 'Commands'
+        $registryPath = Join-Path $commandsRoot 'commandRegistry.json'
+        $descriptorPath = Join-Path $commandsRoot 'revAgentCommandSet\command.json'
+        $dllPath = Join-Path $commandsRoot "revAgentCommandSet\$revitVersion\revAgentCommandSet.dll"
+        foreach ($required in @($registryPath, $descriptorPath, $dllPath)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+                $relative = [IO.Path]::GetRelativePath($AddinRoot, $required).Replace('\', '/')
+                throw "Add-in command payload lacks required file: $relative"
+            }
+        }
+
+        $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
+        $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
+        $descriptorCommands = @($descriptor.commands)
+        $registryCommands = @($registry.Commands)
+        if ([string]$descriptor.name -ne 'revAgentCommandSet' -or $descriptorCommands.Count -eq 0 -or
+            $registryCommands.Count -ne $descriptorCommands.Count) {
+            throw "Add-in command payload manifest shape is invalid for Revit $revitVersion."
+        }
+        foreach ($descriptorCommand in $descriptorCommands) {
+            $matches = @($registryCommands | Where-Object { [string]$_.commandName -ceq [string]$descriptorCommand.commandName })
+            $expectedAssemblyPath = "revAgentCommandSet\\$revitVersion\\revAgentCommandSet.dll"
+            if ($matches.Count -ne 1 -or -not [bool]$matches[0].enabled -or
+                [string]$matches[0].assemblyPath -cne $expectedAssemblyPath -or
+                @($matches[0].supportedRevitVersions).Count -ne 1 -or
+                [string]@($matches[0].supportedRevitVersions)[0] -cne $revitVersion) {
+                throw "Add-in command registry does not resolve '$($descriptorCommand.commandName)' to the Revit $revitVersion command-set DLL."
+            }
+        }
+    }
+}
+
 function New-DeterministicZip {
     param([string]$Source, [string]$Destination)
     Add-Type -AssemblyName System.IO.Compression
@@ -140,9 +231,11 @@ try {
             $source = Join-Path $RepoRoot "src\revit-plugin\revAgentPlugin\bin\Release\$revitVersion"
             Copy-SourceFreeTree -Source $source -Destination (Join-Path $addinStage "$revitVersion\revAgentPlugin")
         }
+        Copy-SourceCommandPayload -RepositoryRoot $RepoRoot -AddinRoot $addinStage -Versions $RevitVersions
     }
     if (-not (Test-Path -LiteralPath (Join-Path $bridgeStage 'revagent-bridge.exe') -PathType Leaf)) { throw 'Bridge package lacks revagent-bridge.exe at its root.' }
     if (@(Get-ChildItem -LiteralPath $addinStage -File -Recurse).Count -eq 0) { throw 'Add-in package is empty.' }
+    Assert-AddinCommandPayloadShape -AddinRoot $addinStage -Versions $RevitVersions
 
     $bridgeZip = Join-Path $stage 'bridge.zip'
     $addinZip = Join-Path $stage 'addin.zip'

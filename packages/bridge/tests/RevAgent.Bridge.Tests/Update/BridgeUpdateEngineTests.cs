@@ -14,6 +14,78 @@ namespace RevAgent.Bridge.Tests.Update;
 public sealed class BridgeUpdateEngineTests
 {
     [Fact]
+    public void DeployAddinSlotWholeDirectoryReplacementPreservesCommandResolution()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"revagent-eu21-command-payload-{Guid.NewGuid():N}");
+        string source = Path.Combine(root, "source");
+        string destination = Path.Combine(root, "installed", "revAgentPlugin");
+        string sourceCommands = Path.Combine(source, "Commands");
+        string sourceCommandSet = Path.Combine(sourceCommands, "revAgentCommandSet");
+        string sourceVersion = Path.Combine(sourceCommandSet, "2022");
+        Directory.CreateDirectory(sourceVersion);
+        Directory.CreateDirectory(destination);
+        File.WriteAllText(Path.Combine(destination, "stale.txt"), "old whole-directory payload");
+        File.WriteAllText(
+            Path.Combine(sourceCommandSet, "command.json"),
+            new JObject
+            {
+                ["name"] = "revAgentCommandSet",
+                ["commands"] = new JArray(new JObject
+                {
+                    ["commandName"] = "fixture_command",
+                    ["assemblyPath"] = "revAgentCommandSet.dll",
+                }),
+            }.ToString());
+        File.WriteAllText(
+            Path.Combine(sourceCommands, "commandRegistry.json"),
+            new JObject
+            {
+                ["Commands"] = new JArray(new JObject
+                {
+                    ["commandName"] = "fixture_command",
+                    ["assemblyPath"] = @"revAgentCommandSet\\2022\\revAgentCommandSet.dll",
+                    ["enabled"] = true,
+                    ["supportedRevitVersions"] = new JArray("2022"),
+                }),
+            }.ToString());
+        File.WriteAllText(
+            Path.Combine(sourceVersion, "revAgentCommandSet.dll"),
+            "generated command-set fixture");
+
+        try
+        {
+            BridgeUpdateEngine.DeployAddinSlot(source, destination);
+
+            Assert.False(File.Exists(Path.Combine(destination, "stale.txt")));
+            string commandsRoot = Path.Combine(destination, "Commands");
+            JObject registry = JObject.Parse(
+                File.ReadAllText(Path.Combine(commandsRoot, "commandRegistry.json")));
+            JObject descriptor = JObject.Parse(
+                File.ReadAllText(Path.Combine(commandsRoot, "revAgentCommandSet", "command.json")));
+            JToken descriptorCommand = Assert.Single(descriptor["commands"]!);
+            JToken registryCommand = Assert.Single(registry["Commands"]!);
+            Assert.Equal(
+                descriptorCommand.Value<string>("commandName"),
+                registryCommand.Value<string>("commandName"));
+            string assemblyPath = registryCommand.Value<string>("assemblyPath")!;
+            Assert.False(Path.IsPathRooted(assemblyPath));
+            string resolvedAssembly = Path.Combine(
+                commandsRoot,
+                assemblyPath.Replace('\\', Path.DirectorySeparatorChar));
+            Assert.True(File.Exists(resolvedAssembly));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task CleanInstallUpdateDeferralApplyAfterCloseAndThreeCrashRollback()
     {
         using var fixture = new UpdateFixture();

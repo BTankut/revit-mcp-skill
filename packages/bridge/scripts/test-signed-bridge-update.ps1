@@ -25,8 +25,17 @@ function Assert-ThrowsLike {
     catch { if ($_.Exception.Message -notmatch $Pattern) { throw "$Message Actual='$($_.Exception.Message)'." } }
 }
 function XmlElement { param([string]$Name, [byte[]]$Value) return "<$Name>$([Convert]::ToBase64String($Value))</$Name>" }
+function Read-ZipEntryText {
+    param([IO.Compression.ZipArchive]$Archive, [string]$EntryName)
+    $entry = $Archive.GetEntry($EntryName)
+    if ($null -eq $entry) { throw "ZIP entry was not found: $EntryName" }
+    $stream = $entry.Open()
+    $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+    try { return $reader.ReadToEnd() } finally { $reader.Dispose(); $stream.Dispose() }
+}
 
 $rsa = [Security.Cryptography.RSA]::Create(2048)
+$privatePath = ''
 try {
     $key = $rsa.ExportParameters($true)
     $publicXml = '<RSAKeyValue>' + (XmlElement Modulus $key.Modulus) + (XmlElement Exponent $key.Exponent) + '</RSAKeyValue>'
@@ -49,6 +58,23 @@ try {
     [IO.File]::WriteAllBytes((Join-Path $preparedBridge 'revagent-bridge.exe'), [Text.Encoding]::UTF8.GetBytes('generated worker fixture'))
     [IO.File]::WriteAllBytes((Join-Path $preparedAddin 'revAgentPlugin.dll'), [Text.Encoding]::UTF8.GetBytes('generated addin fixture'))
     [IO.File]::WriteAllText((Join-Path $preparedAddin 'ignored.pdb'), 'must be excluded')
+    $fixtureCommandsRoot = Join-Path $preparedAddin 'Commands'
+    $fixtureCommandSetRoot = Join-Path $fixtureCommandsRoot 'revAgentCommandSet'
+    $fixtureCommandSetVersionRoot = Join-Path $fixtureCommandSetRoot '2022'
+    [void](New-Item -ItemType Directory -Path $fixtureCommandSetVersionRoot)
+    $fixtureDescriptor = [ordered]@{
+        name = 'revAgentCommandSet'
+        developer = [ordered]@{ name = 'DPE'; email = ''; website = 'https://www.revagent.app'; organization = 'DPE' }
+        commands = @([ordered]@{ commandName = 'fixture_command'; description = 'Generated packaging fixture'; assemblyPath = 'revAgentCommandSet.dll' })
+    }
+    $fixtureRegistry = [ordered]@{ Commands = @([ordered]@{
+        commandName = 'fixture_command'; assemblyPath = 'revAgentCommandSet\\2022\\revAgentCommandSet.dll'
+        enabled = $true; supportedRevitVersions = @('2022'); developer = $fixtureDescriptor.developer
+        description = 'Generated packaging fixture'
+    }) }
+    [IO.File]::WriteAllText((Join-Path $fixtureCommandSetRoot 'command.json'), (($fixtureDescriptor | ConvertTo-Json -Depth 10) + "`n"), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $fixtureCommandsRoot 'commandRegistry.json'), (($fixtureRegistry | ConvertTo-Json -Depth 10) + "`n"), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllBytes((Join-Path $fixtureCommandSetVersionRoot 'revAgentCommandSet.dll'), [Text.Encoding]::UTF8.GetBytes('generated command-set fixture'))
 
     & $DotnetPath restore (Join-Path $RepoRoot 'packages\bridge\src\RevAgent.Bridge.ReleaseSigner\RevAgent.Bridge.ReleaseSigner.csproj') --locked-mode
     if ($LASTEXITCODE -ne 0) { throw 'Signer locked restore failed.' }
@@ -61,6 +87,25 @@ try {
         DotnetPath = $DotnetPath; PreparedBridgeDirectory = $preparedBridge; PreparedAddinDirectory = (Split-Path (Split-Path $preparedAddin))
         FixturePreparedPayload = $true
     }
+    foreach ($missingCase in @(
+            [ordered]@{ Name = 'registry'; Relative = '2022\revAgentPlugin\Commands\commandRegistry.json' },
+            [ordered]@{ Name = 'descriptor'; Relative = '2022\revAgentPlugin\Commands\revAgentCommandSet\command.json' },
+            [ordered]@{ Name = 'dll'; Relative = '2022\revAgentPlugin\Commands\revAgentCommandSet\2022\revAgentCommandSet.dll' }
+        )) {
+        $negativeRoot = Join-Path $ArtifactsRoot ("missing-" + $missingCase.Name)
+        $negativeAddin = Join-Path $negativeRoot 'prepared-addin'
+        [void](New-Item -ItemType Directory -Path $negativeRoot)
+        Copy-Item -LiteralPath (Split-Path (Split-Path $preparedAddin)) -Destination $negativeAddin -Recurse
+        Remove-Item -LiteralPath (Join-Path $negativeAddin $missingCase.Relative)
+        $negativeArgs = @{}
+        foreach ($entry in $common.GetEnumerator()) { $negativeArgs[$entry.Key] = $entry.Value }
+        $negativeArgs.PreparedAddinDirectory = $negativeAddin
+        $negativeOutput = Join-Path $ArtifactsRoot ("missing-" + $missingCase.Name + '-output')
+        Assert-ThrowsLike -Pattern 'Add-in command payload lacks required file' -Message "Missing $($missingCase.Name) must fail before ZIP creation or signing." -Action {
+            & (Join-Path $PSScriptRoot 'build-signed-bridge-update.ps1') @negativeArgs -OutputRoot $negativeOutput | Out-Null
+        }
+        Assert-True (-not (Test-Path -LiteralPath $negativeOutput)) "Missing $($missingCase.Name) refusal must not publish an output root."
+    }
     $first = Join-Path $ArtifactsRoot 'release-a'
     $second = Join-Path $ArtifactsRoot 'release-b'
     & (Join-Path $PSScriptRoot 'build-signed-bridge-update.ps1') @common -OutputRoot $first | Out-Null
@@ -72,7 +117,18 @@ try {
     try {
         $entryNames = @($addinArchive.Entries.FullName)
         Assert-True ($entryNames -contains '2022/revAgentPlugin/revAgentPlugin.dll') 'Add-in replacement layout is absent.'
+        Assert-True ($entryNames -contains '2022/revAgentPlugin/Commands/commandRegistry.json') 'Add-in command registry is absent.'
+        Assert-True ($entryNames -contains '2022/revAgentPlugin/Commands/revAgentCommandSet/command.json') 'Add-in command descriptor is absent.'
+        Assert-True ($entryNames -contains '2022/revAgentPlugin/Commands/revAgentCommandSet/2022/revAgentCommandSet.dll') 'Add-in command-set DLL is absent.'
         Assert-True (-not ($entryNames | Where-Object { $_ -match '(?i)\.(pdb|cs|ps1|psm1)$' })) 'Source/debug material entered the add-in ZIP.'
+        $zippedRegistry = Read-ZipEntryText -Archive $addinArchive -EntryName '2022/revAgentPlugin/Commands/commandRegistry.json' | ConvertFrom-Json
+        $zippedDescriptor = Read-ZipEntryText -Archive $addinArchive -EntryName '2022/revAgentPlugin/Commands/revAgentCommandSet/command.json' | ConvertFrom-Json
+        Assert-Equal @($zippedRegistry.Commands).Count @($zippedDescriptor.commands).Count 'Registry and descriptor command counts differ.'
+        foreach ($command in @($zippedDescriptor.commands)) {
+            $matches = @($zippedRegistry.Commands | Where-Object { [string]$_.commandName -ceq [string]$command.commandName })
+            Assert-Equal $matches.Count 1 "Registry command correspondence is invalid for '$($command.commandName)'."
+            Assert-Equal ([string]$matches[0].assemblyPath) 'revAgentCommandSet\\2022\\revAgentCommandSet.dll' "Registry DLL correspondence is invalid for '$($command.commandName)'."
+        }
     }
     finally { $addinArchive.Dispose() }
 
@@ -150,12 +206,20 @@ try {
         }
     }
     [ordered]@{
-        success = $true; tests = 21; signerOracleParity = $true; deterministicPackages = $true
+        success = $true; tests = 33; signerOracleParity = $true; deterministicPackages = $true
+        commandPayloadShape = $true; missingCommandPayloadFailsClosed = $true
         bridgeSha256 = (Get-FileHash (Join-Path $first 'bridge.zip')).Hash.ToLowerInvariant()
         addinSha256 = (Get-FileHash (Join-Path $first 'addin.zip')).Hash.ToLowerInvariant()
         frozenWorkflowSha256 = $frozenWorkflowHash; frozenIntegrityModuleSha256 = $frozenModuleHash
     } | ConvertTo-Json -Compress
 }
 finally {
+    if ($privatePath -and (Test-Path -LiteralPath $privatePath -PathType Leaf)) {
+        $ownedPrivatePath = [IO.Path]::GetFullPath($privatePath)
+        if (-not $ownedPrivatePath.StartsWith($ArtifactsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove generated private key outside focused artifacts: $ownedPrivatePath"
+        }
+        Remove-Item -LiteralPath $ownedPrivatePath -Force
+    }
     $rsa.Dispose()
 }
