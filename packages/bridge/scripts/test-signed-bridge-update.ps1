@@ -19,6 +19,11 @@ if (Test-Path -LiteralPath $ArtifactsRoot) { Remove-Item -LiteralPath $Artifacts
 
 function Assert-Equal { param($Actual, $Expected, [string]$Message) if (-not [object]::Equals($Actual, $Expected)) { throw "$Message Actual='$Actual' Expected='$Expected'." } }
 function Assert-True { param([bool]$Condition, [string]$Message) if (-not $Condition) { throw $Message } }
+function Assert-ThrowsLike {
+    param([scriptblock]$Action, [string]$Pattern, [string]$Message)
+    try { & $Action; throw "$Message Expected an exception." }
+    catch { if ($_.Exception.Message -notmatch $Pattern) { throw "$Message Actual='$($_.Exception.Message)'." } }
+}
 function XmlElement { param([string]$Name, [byte[]]$Value) return "<$Name>$([Convert]::ToBase64String($Value))</$Name>" }
 
 $rsa = [Security.Cryptography.RSA]::Create(2048)
@@ -54,6 +59,7 @@ try {
         TrustedKeysPath = $trustedPath; CreatedAtUtc = '2026-09-07T12:34:56.0000000Z'
         Repository = 'BTankut/revAgent'; HeadSha = ('a' * 40); HeadTree = ('b' * 40); RepoRoot = $RepoRoot
         DotnetPath = $DotnetPath; PreparedBridgeDirectory = $preparedBridge; PreparedAddinDirectory = (Split-Path (Split-Path $preparedAddin))
+        FixturePreparedPayload = $true
     }
     $first = Join-Path $ArtifactsRoot 'release-a'
     $second = Join-Path $ArtifactsRoot 'release-b'
@@ -97,6 +103,45 @@ try {
     $changed = @(& git -C $RepoRoot diff --name-only 4eeccd530639a8a8f5a3ebd408964009335ea108 --)
     Assert-True (-not ($changed -contains '.github/workflows/signed-source-free-cd.yml')) 'Frozen workflow appears in changed paths.'
     Assert-True (-not ($changed -contains 'installer/lib/RevAgent.DistributionIntegrity.psm1')) 'Frozen integrity module appears in changed paths.'
+
+    $actualHead = (& git -C $RepoRoot rev-parse HEAD | Out-String).Trim()
+    $actualTree = (& git -C $RepoRoot show -s --format=%T HEAD | Out-String).Trim()
+    $sourceArgs = @{}
+    foreach ($entry in $common.GetEnumerator()) { $sourceArgs[$entry.Key] = $entry.Value }
+    [void]$sourceArgs.Remove('PreparedBridgeDirectory')
+    [void]$sourceArgs.Remove('PreparedAddinDirectory')
+    [void]$sourceArgs.Remove('FixturePreparedPayload')
+    $sourceArgs.HeadSha = '0' * 40
+    $sourceArgs.HeadTree = $actualTree
+    Assert-ThrowsLike -Pattern 'does not match the actual Git HEAD and tree' -Message 'Wrong HEAD SHA must fail before build/sign.' -Action {
+        & (Join-Path $PSScriptRoot 'build-signed-bridge-update.ps1') @sourceArgs -OutputRoot (Join-Path $ArtifactsRoot 'wrong-head') | Out-Null
+    }
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $ArtifactsRoot 'wrong-head'))) 'Wrong HEAD refusal must precede staging output.'
+    $sourceArgs.HeadSha = $actualHead
+    $sourceArgs.HeadTree = '0' * 40
+    Assert-ThrowsLike -Pattern 'does not match the actual Git HEAD and tree' -Message 'Wrong tree must fail before build/sign.' -Action {
+        & (Join-Path $PSScriptRoot 'build-signed-bridge-update.ps1') @sourceArgs -OutputRoot (Join-Path $ArtifactsRoot 'wrong-tree') | Out-Null
+    }
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $ArtifactsRoot 'wrong-tree'))) 'Wrong tree refusal must precede staging output.'
+    $sourceArgs.HeadTree = $actualTree
+    $trackedFixture = Join-Path $RepoRoot 'packages\bridge\test-fixtures\signing\p3t12\README.md'
+    $trackedFixtureBytes = [IO.File]::ReadAllBytes($trackedFixture)
+    try {
+        [IO.File]::AppendAllText($trackedFixture, "`ntracked-dirty-provenance-negative", [Text.UTF8Encoding]::new($false))
+        Assert-ThrowsLike -Pattern 'tracked-clean Git worktree' -Message 'Tracked-dirty source must fail before build/sign.' -Action {
+            & (Join-Path $PSScriptRoot 'build-signed-bridge-update.ps1') @sourceArgs -OutputRoot (Join-Path $ArtifactsRoot 'tracked-dirty') | Out-Null
+        }
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $ArtifactsRoot 'tracked-dirty'))) 'Tracked-dirty refusal must precede staging output.'
+    }
+    finally { [IO.File]::WriteAllBytes($trackedFixture, $trackedFixtureBytes) }
+
+    $workflowText = Get-Content -LiteralPath (Join-Path $RepoRoot '.github\workflows\bridge-cd.yml') -Raw
+    Assert-True ($workflowText -match "(?s)production-import:\s+name: Gateway-host immutable import\s+if: >-\s+github\.event_name == 'workflow_dispatch' &&\s+github\.ref == 'refs/heads/main' &&\s+inputs\.publish_release == true &&\s+inputs\.publish_confirmation == 'PUBLISH_BRIDGE_UPDATE'") 'Production import must require protected main at the job boundary.'
+    function Test-ImportAdmission([string]$EventName, [string]$Ref, [bool]$Publish, [string]$Confirmation) {
+        return $EventName -eq 'workflow_dispatch' -and $Ref -eq 'refs/heads/main' -and $Publish -and $Confirmation -eq 'PUBLISH_BRIDGE_UPDATE'
+    }
+    Assert-True (-not (Test-ImportAdmission 'workflow_dispatch' 'refs/heads/topic' $true 'PUBLISH_BRIDGE_UPDATE')) 'Branch dispatch must skip production import.'
+    Assert-True (Test-ImportAdmission 'workflow_dispatch' 'refs/heads/main' $true 'PUBLISH_BRIDGE_UPDATE') 'Main dispatch with existing controls must admit production import.'
     $privateText = Get-Content -LiteralPath $privatePath -Raw
     foreach ($releaseRoot in @($first, $second)) {
         foreach ($file in Get-ChildItem -LiteralPath $releaseRoot -File -Recurse) {
@@ -105,7 +150,7 @@ try {
         }
     }
     [ordered]@{
-        success = $true; tests = 12; signerOracleParity = $true; deterministicPackages = $true
+        success = $true; tests = 21; signerOracleParity = $true; deterministicPackages = $true
         bridgeSha256 = (Get-FileHash (Join-Path $first 'bridge.zip')).Hash.ToLowerInvariant()
         addinSha256 = (Get-FileHash (Join-Path $first 'addin.zip')).Hash.ToLowerInvariant()
         frozenWorkflowSha256 = $frozenWorkflowHash; frozenIntegrityModuleSha256 = $frozenModuleHash

@@ -180,6 +180,7 @@ jobs:
     name: Gateway-host immutable import
     if: >-
       github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
       inputs.publish_release == true &&
       inputs.publish_confirmation == 'PUBLISH_BRIDGE_UPDATE'
     needs: production-sign

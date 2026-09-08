@@ -20,7 +20,8 @@ param(
     [string]$DotnetPath = 'dotnet',
     [string[]]$RevitVersions = @('2022'),
     [string]$PreparedBridgeDirectory = '',
-    [string]$PreparedAddinDirectory = ''
+    [string]$PreparedAddinDirectory = '',
+    [switch]$FixturePreparedPayload
 )
 
 Set-StrictMode -Version Latest
@@ -40,6 +41,37 @@ if ((Test-Path -LiteralPath $OutputRoot) -or $ReleaseId -notmatch '^[0-9a-f]{8}-
 $gateway = [Uri]$GatewayBaseUrl
 if ($gateway.Scheme -ne 'https' -or -not [string]::IsNullOrEmpty($gateway.UserInfo) -or -not [string]::IsNullOrEmpty($gateway.Fragment)) {
     throw 'GatewayBaseUrl must be an HTTPS origin without user-info or fragment.'
+}
+$preparedPayload = -not [string]::IsNullOrWhiteSpace($PreparedBridgeDirectory) -or
+    -not [string]::IsNullOrWhiteSpace($PreparedAddinDirectory)
+if ($preparedPayload) {
+    if (-not $FixturePreparedPayload -or -not $PreparedBridgeDirectory -or -not $PreparedAddinDirectory) {
+        throw 'Prepared payloads require both directories and explicit -FixturePreparedPayload.'
+    }
+    $provenanceSourceKind = 'generated-fixture-prepared-payload'
+    $provenanceHeadSha = $null
+    $provenanceHeadTree = $null
+}
+else {
+    $actualHeadSha = (& git -C $RepoRoot rev-parse --verify HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualHeadSha -notmatch '^[0-9a-f]{40}$') {
+        throw 'Source-build provenance requires a readable Git HEAD.'
+    }
+    $actualHeadTree = (& git -C $RepoRoot show -s --format=%T HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualHeadTree -notmatch '^[0-9a-f]{40}$') {
+        throw 'Source-build provenance requires a readable Git tree.'
+    }
+    $trackedStatus = @(& git -C $RepoRoot status --porcelain=v1 --untracked-files=no)
+    if ($LASTEXITCODE -ne 0 -or $trackedStatus.Count -ne 0) {
+        throw 'Source-build provenance requires a tracked-clean Git worktree.'
+    }
+    if (-not [string]::Equals($HeadSha, $actualHeadSha, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($HeadTree, $actualHeadTree, [StringComparison]::Ordinal)) {
+        throw 'Supplied source provenance does not match the actual Git HEAD and tree.'
+    }
+    $provenanceSourceKind = 'git-clean-source-build'
+    $provenanceHeadSha = $actualHeadSha
+    $provenanceHeadTree = $actualHeadTree
 }
 $outputParent = Split-Path -Parent $OutputRoot
 if (-not (Test-Path -LiteralPath $outputParent -PathType Container)) {
@@ -92,12 +124,9 @@ function Get-Sha256Lower { param([string]$Path) return (Get-FileHash -Algorithm 
 try {
     $bridgeStage = Join-Path $stage 'bridge-content'
     $addinStage = Join-Path $stage 'addin-content'
-    if ($PreparedBridgeDirectory -and $PreparedAddinDirectory) {
+    if ($preparedPayload) {
         Copy-SourceFreeTree -Source ([IO.Path]::GetFullPath($PreparedBridgeDirectory)) -Destination $bridgeStage
         Copy-SourceFreeTree -Source ([IO.Path]::GetFullPath($PreparedAddinDirectory)) -Destination $addinStage
-    }
-    elseif ($PreparedBridgeDirectory -or $PreparedAddinDirectory) {
-        throw 'Prepared bridge and add-in directories must be supplied together.'
     }
     else {
         $bridgeProject = Join-Path $RepoRoot 'packages\bridge\src\RevAgent.Bridge\RevAgent.Bridge.csproj'
@@ -142,8 +171,10 @@ try {
         schemaVersion = 1
         releaseId = $ReleaseId
         repository = $Repository
-        headSha = $HeadSha
-        headTree = $HeadTree
+        sourceKind = $provenanceSourceKind
+        fixtureOnly = $preparedPayload
+        headSha = $provenanceHeadSha
+        headTree = $provenanceHeadTree
         createdAtUtc = $CreatedAtUtc
         tools = [ordered]@{ dotnet = (& $DotnetPath --version); pwsh = $PSVersionTable.PSVersion.ToString() }
         components = [ordered]@{ bridge = [ordered]@{ sha256 = $bridgeHash; sizeBytes = (Get-Item $bridgeZip).Length }; addin = [ordered]@{ sha256 = $addinHash; sizeBytes = (Get-Item $addinZip).Length } }

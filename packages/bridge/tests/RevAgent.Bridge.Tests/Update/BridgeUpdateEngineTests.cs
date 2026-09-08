@@ -79,6 +79,54 @@ public sealed class BridgeUpdateEngineTests
     }
 
     [Fact]
+    public async Task PendingAddinWaitingBehindRollbackCannotApplyQuarantinedVersion()
+    {
+        using var fixture = new UpdateFixture();
+        fixture.Revit.IsRunning = true;
+        BridgeUpdateResult deferred = await fixture.Engine.ApplyAsync(
+            fixture.Release("2.0.0", sequence: 2),
+            CancellationToken.None);
+        Assert.Equal(BridgeUpdateDisposition.DeferredForRevitClose, deferred.Disposition);
+
+        Assert.False((await fixture.Rollback.RecordUnexpectedExitAsync(
+            CancellationToken.None)).RolledBack);
+        Assert.False((await fixture.Rollback.RecordUnexpectedExitAsync(
+            CancellationToken.None)).RolledBack);
+        fixture.Revit.IsRunning = false;
+
+        var pendingWaiting = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowPending = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.State.BeforeMutationAcquireAsync = async (operation, cancellationToken) =>
+        {
+            if (operation == "pending_addin_apply")
+            {
+                pendingWaiting.TrySetResult();
+                await allowPending.Task.WaitAsync(cancellationToken);
+            }
+        };
+
+        Task<bool> pendingApply = fixture.Engine.TryApplyPendingAddinAsync(
+            CancellationToken.None);
+        await pendingWaiting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        CrashRollbackResult rollback = await fixture.Rollback.RecordUnexpectedExitAsync(
+            CancellationToken.None);
+        Assert.True(rollback.RolledBack);
+        allowPending.TrySetResult();
+
+        Assert.False(await pendingApply);
+        BridgeUpdateState state = await fixture.State.ReadAsync(CancellationToken.None);
+        Assert.Equal("1.0.0", state.ActiveVersion);
+        Assert.Contains("2.0.0", state.QuarantinedVersions.Keys);
+        Assert.Null(state.PendingAddinVersion);
+        Assert.Equal("v1-addin", File.ReadAllText(fixture.AddinPayloadPath));
+        Assert.Equal(
+            "1.0.0",
+            File.ReadAllText(fixture.Layout.CurrentVersionPointerPath).Trim());
+    }
+
+    [Fact]
     public async Task SignatureHashSequenceRingAndPrincipalNegativesFailClosed()
     {
         using var signatureFixture = new UpdateFixture();

@@ -34,6 +34,13 @@ internal sealed class BridgeUpdateStateStore
 
     private readonly BridgeInstallLayout _layout;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _mutationGate = new(1, 1);
+
+    internal Func<string, CancellationToken, Task>? BeforeMutationAcquireAsync
+    {
+        get;
+        set;
+    }
 
     internal BridgeUpdateStateStore(BridgeInstallLayout layout)
     {
@@ -87,6 +94,26 @@ internal sealed class BridgeUpdateStateStore
         await File.WriteAllTextAsync(temporary, version + Environment.NewLine, cancellationToken)
             .ConfigureAwait(false);
         File.Move(temporary, _layout.CurrentVersionPointerPath, overwrite: true);
+    }
+
+    internal async ValueTask<IAsyncDisposable> AcquireMutationAsync(
+        string operation,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(operation))
+        {
+            throw new ArgumentException("Update mutation operation is required.", nameof(operation));
+        }
+
+        Func<string, CancellationToken, Task>? beforeAcquire =
+            BeforeMutationAcquireAsync;
+        if (beforeAcquire is not null)
+        {
+            await beforeAcquire(operation, cancellationToken).ConfigureAwait(false);
+        }
+
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new MutationLease(_mutationGate);
     }
 
     private async Task<BridgeUpdateState> ReadCoreAsync(
@@ -211,6 +238,22 @@ internal sealed class BridgeUpdateStateStore
             throw new BridgeUpdateRejectedException(
                 "invalid_update_state",
                 $"The {label} manifest digest is invalid.");
+        }
+    }
+
+    private sealed class MutationLease : IAsyncDisposable
+    {
+        private SemaphoreSlim? _gate;
+
+        internal MutationLease(SemaphoreSlim gate)
+        {
+            _gate = gate;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Exchange(ref _gate, null)?.Release();
+            return ValueTask.CompletedTask;
         }
     }
 }

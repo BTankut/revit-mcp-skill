@@ -29,12 +29,26 @@ internal sealed class PendingAddinApplier
 
     internal async Task<bool> TryApplyAsync(CancellationToken cancellationToken)
     {
+        await using IAsyncDisposable mutation = await _stateStore.AcquireMutationAsync(
+            "pending_addin_apply",
+            cancellationToken).ConfigureAwait(false);
         BridgeUpdateState state = await _stateStore.ReadAsync(cancellationToken)
             .ConfigureAwait(false);
         if (state.PendingAddinVersion is null || state.PendingAddinPath is null ||
             _revit.IsRevitRunning())
         {
             return false;
+        }
+
+        if (!string.Equals(
+                state.ActiveVersion,
+                state.PendingAddinVersion,
+                StringComparison.Ordinal) ||
+            state.QuarantinedVersions.ContainsKey(state.PendingAddinVersion))
+        {
+            throw new BridgeUpdateRejectedException(
+                "pending_addin_stale",
+                "Pending add-in target is no longer the active non-quarantined release.");
         }
 
         string slot = Path.GetFullPath(state.PendingAddinPath);
@@ -52,11 +66,27 @@ internal sealed class PendingAddinApplier
 
         BridgeUpdateEngine.DeployAddinSlot(slot, _layout.AddinRoot);
         await _stateStore.MutateAsync(
-            current => current with
-            {
-                PendingAddinVersion = null,
-                PendingAddinPath = null,
-            },
+            current => string.Equals(
+                    current.PendingAddinVersion,
+                    state.PendingAddinVersion,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    current.PendingAddinPath,
+                    state.PendingAddinPath,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    current.ActiveVersion,
+                    state.PendingAddinVersion,
+                    StringComparison.Ordinal) &&
+                !current.QuarantinedVersions.ContainsKey(state.PendingAddinVersion)
+                    ? current with
+                    {
+                        PendingAddinVersion = null,
+                        PendingAddinPath = null,
+                    }
+                    : throw new BridgeUpdateRejectedException(
+                        "pending_addin_stale",
+                        "Pending add-in authority changed during its guarded apply."),
             cancellationToken).ConfigureAwait(false);
         if (_reports is not null && state.AcceptedManifestDigest is not null)
         {

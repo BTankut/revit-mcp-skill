@@ -32,6 +32,9 @@ internal sealed class CrashLoopRollbackController
         CancellationToken cancellationToken)
     {
         DateTimeOffset now = _timeProvider.GetUtcNow();
+        await using IAsyncDisposable mutation = await _stateStore.AcquireMutationAsync(
+            "crash_loop_rollback",
+            cancellationToken).ConfigureAwait(false);
         BridgeUpdateState state = await _stateStore.ReadAsync(cancellationToken)
             .ConfigureAwait(false);
         if (state.PreviousVersion is null || state.VersionActivatedAtUtc is null ||
