@@ -208,6 +208,116 @@ public sealed partial class RbpConnectionCoordinatorTests
         throw new InvalidOperationException("Unreachable normal-stop path.");
     }
 
+    private static async Task ExecuteWithFailurePreservingCoordinatorCleanupAsync(
+        RbpConnectionCoordinator coordinator,
+        CancellationTokenSource stop,
+        Task run,
+        Func<Task> operation,
+        Func<Task>? afterCleanup = null)
+    {
+        Exception? primaryFailure = null;
+        try
+        {
+            await operation();
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+            throw;
+        }
+        finally
+        {
+            if (!run.IsCompleted)
+            {
+                Exception? cleanupFailure =
+                    await StopCoordinatorAfterFailureAsync(
+                        coordinator, stop, run);
+                if (afterCleanup is not null)
+                {
+                    try
+                    {
+                        await afterCleanup();
+                    }
+                    catch (Exception exception)
+                    {
+                        cleanupFailure = CombineCleanupFailures(
+                            cleanupFailure, exception);
+                    }
+                }
+
+                if (cleanupFailure is not null)
+                {
+                    if (primaryFailure is null) throw cleanupFailure;
+                    primaryFailure.Data["normal-stop-cleanup-failure"] =
+                        ExceptionDiagnostic(cleanupFailure);
+                }
+            }
+        }
+    }
+
+    private static async Task<Exception?> StopCoordinatorAfterFailureAsync(
+        RbpConnectionCoordinator coordinator,
+        CancellationTokenSource stop,
+        Task run)
+    {
+        Exception? cleanupFailure = null;
+        Task<RbpCoordinatorTeardownResult>? teardown = null;
+        RbpCoordinatorTeardownResult? result = null;
+        try
+        {
+            teardown = coordinator.RequestStopTeardown();
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = CombineCleanupFailures(cleanupFailure, exception);
+        }
+
+        try
+        {
+            stop.Cancel();
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = CombineCleanupFailures(cleanupFailure, exception);
+        }
+
+        if (teardown is not null)
+        {
+            try
+            {
+                result = await teardown.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (Exception exception)
+            {
+                cleanupFailure = CombineCleanupFailures(
+                    cleanupFailure, exception);
+            }
+        }
+
+        try
+        {
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (RbpCoordinatorException) when (
+            result?.Disposition ==
+                RbpCoordinatorTeardownDisposition.EmergencyMustExit)
+        {
+            // The primary failure remains authoritative; this is the expected
+            // terminal signal from fail-closed coordinator cleanup.
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = CombineCleanupFailures(cleanupFailure, exception);
+        }
+
+        return cleanupFailure;
+    }
+
+    private static Exception CombineCleanupFailures(
+        Exception? existing,
+        Exception next) => existing is null ? next :
+        new AggregateException(existing, next);
+
     private static string NormalStopWaitDiagnostic(
         RbpConnectionCoordinator coordinator)
     {

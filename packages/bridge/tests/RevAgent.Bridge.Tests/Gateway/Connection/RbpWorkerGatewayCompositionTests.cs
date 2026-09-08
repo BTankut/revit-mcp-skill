@@ -215,26 +215,29 @@ public sealed partial class RbpConnectionCoordinatorTests
         using var stop = new CancellationTokenSource();
 
         Task run = coordinator.RunAsync(stop.Token);
-        bool completed = false;
-        try
-        {
-            await EventuallyAsync(() =>
+        await ExecuteWithFailurePreservingCoordinatorCleanupAsync(
+            coordinator,
+            stop,
+            run,
+            async () =>
             {
-                RbpConnectionCoordinatorSnapshot snapshot =
-                    coordinator.GetSnapshot();
-                return snapshot.Lifecycle.Phase == RbpConnectionPhase.Steady &&
-                       snapshot.HasActiveConnection &&
-                       snapshot.ActiveRsids.Count == 1;
-            });
+                await EventuallyAsync(() =>
+                {
+                    RbpConnectionCoordinatorSnapshot snapshot =
+                        coordinator.GetSnapshot();
+                    return snapshot.Lifecycle.Phase == RbpConnectionPhase.Steady &&
+                           snapshot.HasActiveConnection &&
+                           snapshot.ActiveRsids.Count == 1;
+                });
 
-            cycle.Deliver(
-                DataEnvelope(
-                    "invoke",
-                    Id(511),
-                    "rs-8080",
-                    1,
-                    Json(
-                        $$"""
+                cycle.Deliver(
+                    DataEnvelope(
+                        "invoke",
+                        Id(511),
+                        "rs-8080",
+                        1,
+                        Json(
+                            $$"""
                         {
                           "invocation_id":"{{Id(512)}}",
                           "method":"get_current_view_info",
@@ -248,66 +251,94 @@ public sealed partial class RbpConnectionCoordinatorTests
                         }
                         """)));
 
-            // FailClosedRbpInboundDataJournal refuses the handoff, which ends
-            // the binding rather than half-handling the frame.
-            await EventuallyAsync(() => cycle.CloseCount >= 1);
+                // FailClosedRbpInboundDataJournal refuses the handoff, which ends
+                // the binding rather than half-handling the frame.
+                await EventuallyAsync(() => cycle.CloseCount >= 1);
 
-            // No data-plane answer was fabricated for the refused invoke.
-            Assert.DoesNotContain(
-                cycle.Sent,
-                envelope => envelope.Type is "error" or "result");
-            Assert.Equal(1, cycle.CloseCount);
-            string normalStopDiagnostic = NormalStopWaitDiagnostic(coordinator);
-            Assert.Contains("rawStopState=", normalStopDiagnostic);
-            Assert.Contains("retainedTeardownTask=", normalStopDiagnostic);
-            Assert.Contains("resourcesSecondaryFault=", normalStopDiagnostic);
-            Task<RbpCoordinatorTeardownResult> teardown =
-                await RequestNormalStopTeardownWhenReadyAsync(coordinator);
-            stop.Cancel();
-            RbpCoordinatorTeardownResult result = await teardown.WaitAsync(
-                TimeSpan.FromSeconds(5));
-            Assert.Equal(
-                RbpCoordinatorTeardownDisposition.NormalStopped,
-                result.Disposition);
-            await run.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Equal(1, cycle.CloseCount);
-            Assert.Equal(1, cycle.DisposeCount);
-            await store.DisposeAsync();
-
-            await using RbpJournalStore reopened = OpenStore(directory, clock);
-            // Accepted but never journaled: reopening the physical journal
-            // proves the fail-closed frontier survived teardown without a
-            // fabricated invocation terminal or acknowledgement.
-            RbpReceiveFrontier frontier =
-                await reopened.GetReceiveFrontierAsync("rs-8080");
-            Assert.Equal(1, frontier.LastAcceptedSequence);
-            Assert.Equal(0, frontier.LastJournaledSequence);
-            Assert.Null(
-                await reopened.GetInvocationAsync("rs-8080/" + Id(512)));
-            completed = true;
-        }
-        finally
-        {
-            if (!completed)
-            {
+                // No data-plane answer was fabricated for the refused invoke.
+                Assert.DoesNotContain(
+                    cycle.Sent,
+                    envelope => envelope.Type is "error" or "result");
+                Assert.Equal(1, cycle.CloseCount);
+                string normalStopDiagnostic = NormalStopWaitDiagnostic(coordinator);
+                Assert.Contains("rawStopState=", normalStopDiagnostic);
+                Assert.Contains("retainedTeardownTask=", normalStopDiagnostic);
+                Assert.Contains("resourcesSecondaryFault=", normalStopDiagnostic);
                 Task<RbpCoordinatorTeardownResult> teardown =
-                    coordinator.RequestStopTeardown();
+                    await RequestNormalStopTeardownWhenReadyAsync(coordinator);
                 stop.Cancel();
-                RbpCoordinatorTeardownResult cleanupResult = await teardown
-                    .WaitAsync(TimeSpan.FromSeconds(5));
-                try
-                {
-                    await run.WaitAsync(TimeSpan.FromSeconds(5));
-                }
-                catch (RbpCoordinatorException) when (
-                    cleanupResult.Disposition ==
-                        RbpCoordinatorTeardownDisposition.EmergencyMustExit)
-                {
-                    // The original assertion still fails; this only completes
-                    // the fail-closed coordinator before fixture disposal.
-                }
-            }
-        }
+                RbpCoordinatorTeardownResult result = await teardown.WaitAsync(
+                    TimeSpan.FromSeconds(5));
+                Assert.Equal(
+                    RbpCoordinatorTeardownDisposition.NormalStopped,
+                    result.Disposition);
+                await run.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.Equal(1, cycle.CloseCount);
+                Assert.Equal(1, cycle.DisposeCount);
+                await store.DisposeAsync();
+
+                await using RbpJournalStore reopened = OpenStore(directory, clock);
+                // Accepted but never journaled: reopening the physical journal
+                // proves the fail-closed frontier survived teardown without a
+                // fabricated invocation terminal or acknowledgement.
+                RbpReceiveFrontier frontier =
+                    await reopened.GetReceiveFrontierAsync("rs-8080");
+                Assert.Equal(1, frontier.LastAcceptedSequence);
+                Assert.Equal(0, frontier.LastJournaledSequence);
+                Assert.Null(
+                    await reopened.GetInvocationAsync("rs-8080/" + Id(512)));
+            });
+    }
+
+    [Fact]
+    public async Task WorkerCompositionFailureCleanupPreservesPrimaryDiagnostic()
+    {
+        using var directory = new RbpJournalTestDirectory();
+        var clock = new ManualCoordinatorClock();
+        await using RbpJournalStore store = OpenStore(directory, clock);
+        var responder = new ScriptedGatewayResponder(clock);
+        var cycle = new FakeConnectionCycle(responder.Respond);
+        RbpConnectionCoordinator coordinator =
+            WorkerGatewayComposition.CreateCoordinator(
+                new WorkerGatewayServices(
+                    new FakeConnectionCycleFactory(cycle),
+                    store,
+                    new MutableSessionCatalog(LocalSession(8080, 1000)),
+                    CompositionOptions(),
+                    DispatchSurface: null,
+                    clock,
+                    new FixedRandomSource(0)));
+        using var stop = new CancellationTokenSource();
+        Task run = coordinator.RunAsync(stop.Token);
+        await EventuallyAsync(() =>
+        {
+            RbpConnectionCoordinatorSnapshot snapshot =
+                coordinator.GetSnapshot();
+            return snapshot.Lifecycle.Phase == RbpConnectionPhase.Steady &&
+                   snapshot.HasActiveConnection;
+        });
+
+        InvalidOperationException primary = await Assert.ThrowsAsync<
+            InvalidOperationException>(() =>
+            ExecuteWithFailurePreservingCoordinatorCleanupAsync(
+                coordinator,
+                stop,
+                run,
+                () => Task.FromException(
+                    new InvalidOperationException(
+                        "injected primary normal-stop diagnostic")),
+                () => Task.FromException(
+                    new TimeoutException("injected cleanup timeout"))));
+
+        Assert.Contains("injected primary normal-stop diagnostic", primary.Message);
+        Assert.Contains(
+            "TimeoutException:injected cleanup timeout",
+            Assert.IsType<string>(primary.Data["normal-stop-cleanup-failure"]));
+        Assert.True(stop.IsCancellationRequested);
+        Assert.True(run.IsCompleted);
+        Assert.Equal(0, coordinator.GetSnapshot().OwnedBackgroundTaskCount);
+        Assert.Equal(1, cycle.CloseCount);
+        Assert.Equal(1, cycle.DisposeCount);
     }
 
     [Fact]

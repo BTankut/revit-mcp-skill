@@ -24,6 +24,10 @@ product-level lifecycle repair are out of scope.
 
 - Focused target: passed, 1/1 in 231 ms after the diagnostic assertions
   exercised the existing missing-dispatch fail-closed fixture.
+- Reviewer rework added
+  `WorkerCompositionFailureCleanupPreservesPrimaryDiagnostic`: 1/1 passed in
+  197 ms with an injected primary diagnostic failure and cleanup timeout. The
+  target then passed again, 1/1 in 208 ms. No broad suite was rerun.
 - The first bounded `RevAgent.Bridge.Tests` run reached the target as passed,
   but was setup-invalid: 1315 passed, 47 failed, and 2 skipped because this
   new worktree lacked `node_modules/typescript/lib/tsc.js` and the PowerCut
@@ -38,6 +42,7 @@ product-level lifecycle repair are out of scope.
   green gate. A subsequent detached duplicate was terminated during cleanup.
 
 Forecast/actual/variance: forecast was one focused test and one bounded full
-suite. Actual was one focused pass and one setup-invalid full suite; the target
-signature remains unresolved and final full-suite validation remains with the
-protected CI. No deterministic fixture adjustment was proved.
+suite. Actual was the original focused pass, two reviewer-focused passes, and
+one setup-invalid full suite; the target signature remains unresolved and final
+full-suite validation remains with the protected CI. No deterministic fixture
+adjustment was proved.
