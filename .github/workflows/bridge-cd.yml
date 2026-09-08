@@ -69,6 +69,31 @@ on:
         description: Type PUBLISH_BRIDGE_UPDATE to authorize production import
         required: false
         type: string
+      resume_existing_artifact:
+        description: Import an existing authenticated Actions artifact without signing again
+        required: true
+        default: false
+        type: boolean
+      source_artifact_id:
+        description: Exact retained Actions artifact id for import resume
+        required: false
+        type: string
+      source_artifact_digest:
+        description: Exact retained outer Actions artifact SHA-256 for import resume
+        required: false
+        type: string
+      source_run_id:
+        description: Exact Actions workflow run that produced the retained artifact
+        required: false
+        type: string
+      source_head_sha:
+        description: Exact retained source commit, which must be current or ancestral protected main
+        required: false
+        type: string
+      importer_runner_label:
+        description: Optional revagent-eu21-resume- plus 12 lowercase hex JIT importer label
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -80,6 +105,7 @@ concurrency:
 jobs:
   generated-key-validation:
     name: Generated-key Bridge delivery validation
+    if: github.event_name != 'workflow_dispatch' || inputs.resume_existing_artifact != true
     runs-on: [self-hosted, Windows, revagent-ci]
     timeout-minutes: 35
     steps:
@@ -103,12 +129,14 @@ jobs:
           packages/gateway/src/bridgeManifestSignature.test.ts
           packages/gateway/src/bridgeReleaseObjectStore.test.ts
           packages/gateway/src/bridgeReleaseImportCli.test.ts
+          packages/gateway/src/bridgeReleaseImportWorkflowInput.test.ts
           packages/gateway/src/bridgeUpdateEndpoint.test.ts
 
   production-sign:
     name: Dedicated Bridge build and production signing
     if: >-
       github.event_name == 'workflow_dispatch' &&
+      inputs.resume_existing_artifact != true &&
       inputs.sign_release == true &&
       inputs.sign_confirmation == 'SIGN_BRIDGE_UPDATE'
     needs: generated-key-validation
@@ -179,12 +207,21 @@ jobs:
   production-import:
     name: Gateway-host immutable import
     if: >-
+      always() &&
+      !cancelled() &&
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
       inputs.publish_release == true &&
-      inputs.publish_confirmation == 'PUBLISH_BRIDGE_UPDATE'
-    needs: production-sign
-    runs-on: [self-hosted, Linux, revagent-gateway-publish]
+      inputs.publish_confirmation == 'PUBLISH_BRIDGE_UPDATE' &&
+      ((inputs.resume_existing_artifact != true &&
+        needs.generated-key-validation.result == 'success' &&
+        needs.production-sign.result == 'success') ||
+       (inputs.resume_existing_artifact == true &&
+        inputs.sign_release == false &&
+        needs.generated-key-validation.result == 'skipped' &&
+        needs.production-sign.result == 'skipped'))
+    needs: [generated-key-validation, production-sign]
+    runs-on: ${{ fromJSON(inputs.importer_runner_label != '' && format('["self-hosted","Linux","revagent-gateway-publish",{0}]', toJSON(inputs.importer_runner_label)) || '["self-hosted","Linux","revagent-gateway-publish"]') }}
     environment: revagent-production-publish
     timeout-minutes: 20
     permissions:
@@ -194,14 +231,38 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.14.1
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Build protected-main Gateway importer
+        run: |
+          npm run build:self --workspace @revagent/protocol
+          npm run build --workspace @revagent/gateway
+      - name: Resolve and authorize exact import source
+        id: import-authority
+        env:
+          BRIDGE_IMPORT_RESUME_EXISTING_ARTIFACT: ${{ inputs.resume_existing_artifact }}
+          BRIDGE_IMPORT_SIGN_RELEASE: ${{ inputs.sign_release }}
+          BRIDGE_IMPORT_PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          BRIDGE_IMPORT_PUBLISH_CONFIRMATION: ${{ inputs.publish_confirmation }}
+          BRIDGE_IMPORT_VALIDATION_JOB_RESULT: ${{ needs.generated-key-validation.result }}
+          BRIDGE_IMPORT_SIGN_JOB_RESULT: ${{ needs.production-sign.result }}
+          BRIDGE_IMPORT_SIGNED_ARTIFACT_ID: ${{ needs.production-sign.outputs.artifact-id }}
+          BRIDGE_IMPORT_SIGNED_ARTIFACT_DIGEST: ${{ needs.production-sign.outputs.artifact-digest }}
+          BRIDGE_IMPORT_SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          BRIDGE_IMPORT_SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          BRIDGE_IMPORT_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          BRIDGE_IMPORT_SOURCE_HEAD_SHA: ${{ inputs.source_head_sha }}
+          BRIDGE_IMPORT_ADDITIONAL_RUNNER_LABEL: ${{ inputs.importer_runner_label }}
+        run: node packages/gateway/dist/bridgeReleaseImportWorkflowInput.js
       - name: Build and apply the pinned migration set
         env:
           DATABASE_URL: ${{ secrets.BRIDGE_RELEASE_PUBLISHER_DATABASE_URL }}
+          DATABASE_MIGRATION_URL: ${{ secrets.BRIDGE_RELEASE_MIGRATION_DATABASE_URL }}
+          REVAGENT_APP_DATABASE_PASSWORD: ${{ secrets.REVAGENT_APP_DATABASE_PASSWORD }}
         run: npm run migrate:up --workspace @revagent/gateway
       - name: Import exact signed release and channel authority
         env:
@@ -209,8 +270,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           OBJECT_STORE_ROOT: ${{ vars.OBJECT_STORE_ROOT }}
           TRUSTED_KEYS_PATH: ${{ vars.BRIDGE_RELEASE_TRUSTED_KEYS_PATH }}
-          ARTIFACT_ID: ${{ needs.production-sign.outputs.artifact-id }}
-          ARTIFACT_DIGEST: ${{ needs.production-sign.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.import-authority.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ steps.import-authority.outputs.artifact_digest }}
+          SOURCE_RUN_ID: ${{ steps.import-authority.outputs.source_run_id }}
+          SOURCE_HEAD_SHA: ${{ steps.import-authority.outputs.source_head_sha }}
           TENANT_IDS: ${{ inputs.tenant_ids }}
           BRIDGE_RELEASE_DEVICE_RINGS_JSON: ${{ inputs.device_rings_json }}
         run: >-
@@ -220,8 +283,8 @@ jobs:
           --artifact-id "$ARTIFACT_ID"
           --artifact-digest "$ARTIFACT_DIGEST"
           --repository "$GITHUB_REPOSITORY"
-          --run-id "$GITHUB_RUN_ID"
-          --head-sha "$GITHUB_SHA"
+          --run-id "$SOURCE_RUN_ID"
+          --head-sha "$SOURCE_HEAD_SHA"
           --object-store-root "$OBJECT_STORE_ROOT"
           --trusted-keys "$TRUSTED_KEYS_PATH"
           --tenant-ids "$TENANT_IDS"

@@ -26,3 +26,18 @@ The resume path must keep the existing authenticated GitHub artifact metadata, r
 - Import-only workflow dispatch and retained artifact publication.
 - Fresh lab delivery/apply/rollback evidence.
 - M6 owner acceptance.
+
+## Implementation and acceptance evidence
+
+- `bridge-cd.yml` now has an explicit `resume_existing_artifact` branch. Normal import still requires successful generated-key validation and production signing; resume requires both jobs to be skipped and `sign_release=false`. Both branches retain protected `main`, `publish_release=true`, and `PUBLISH_BRIDGE_UPDATE` gates.
+- The import job always retains `self-hosted`, `Linux`, and `revagent-gateway-publish`. Its optional fourth label accepts only `revagent-eu21-resume-` plus 12 lowercase hexadecimal characters and therefore only narrows runner selection.
+- The protected-main helper resolves either same-run signing outputs or retained artifact coordinates, verifies the checked-out commit, and requires the retained source head to equal or precede the current protected-main head before migrations.
+- Migration credentials remain step-scoped: the migration URL must come from `BRIDGE_RELEASE_MIGRATION_DATABASE_URL`, the application-role password from `REVAGENT_APP_DATABASE_PASSWORD`, and the publisher URL remains independently supplied through `BRIDGE_RELEASE_PUBLISHER_DATABASE_URL`.
+- Focused resolver and workflow tests: 12/12 passed. Raw log: `artifacts/eu21-import-resume/logs/focused-tests.log`.
+- Protocol/Gateway build, Gateway lint, and Gateway typecheck passed. Raw logs: `artifacts/eu21-import-resume/logs/build.log`, `lint.log`, and `typecheck.log`.
+- Workflow YAML parsing and immutable action-pin validation passed. Raw logs: `artifacts/eu21-import-resume/logs/workflow-yaml.log` and `workflow-pins.log`.
+- A local CLI smoke used the exact retained run/artifact/digest/source coordinates and the scoped JIT label; it resolved resume mode and preserved the normalized SHA-256 authority. Output: `artifacts/eu21-import-resume/logs/resolver-smoke-output.log`.
+
+Forecast was 1.5-2.5 implementation hours. Actual local implementation and focused verification was approximately 0.4 hours, a variance of -1.1 to -2.1 hours. Protected review, merge, runner preparation, import execution, lab evidence, and owner acceptance remain excluded.
+
+The draft PR must remain unmerged until protected checks and review are green and the operator grants separate merge approval. This slice does not authorize signing, import dispatch, runner registration, lab mutation, or M6 acceptance.
