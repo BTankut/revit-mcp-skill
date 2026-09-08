@@ -19,3 +19,23 @@ to the named test.
 
 Park List: production behavior, timeout/retry changes, CI reruns, and any
 product-level lifecycle repair are out of scope.
+
+## Local evidence
+
+- Focused target: passed, 1/1 in 231 ms after the diagnostic assertions
+  exercised the existing missing-dispatch fail-closed fixture.
+- The first bounded `RevAgent.Bridge.Tests` run reached the target as passed,
+  but was setup-invalid: 1315 passed, 47 failed, and 2 skipped because this
+  new worktree lacked `node_modules/typescript/lib/tsc.js` and the PowerCut
+  harness executable.
+- Pinned Node 24.14.1 `npm ci --ignore-scripts`, the protocol and add-in
+  fixture builds, locked solution restore, and Release solution build then
+  completed without generated-source drift or build errors.
+- No normal-stop assertion failure reproduced locally, so no state-4 or
+  `AttemptTeardownResources.SecondaryFault` was captured. A later detached
+  local test output is retained as incomplete duplicate evidence, not as a
+  green gate.
+
+Forecast/actual/variance: forecast was one focused test and one bounded full
+suite. Actual was one focused pass and one setup-invalid full suite; the target
+signature remains unresolved. No deterministic fixture adjustment was proved.

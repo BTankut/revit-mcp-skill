@@ -202,8 +202,99 @@ public sealed partial class RbpConnectionCoordinatorTests
             await Task.Delay(5);
         }
 
-        Assert.Fail("The coordinator never reached a normal-stop state.");
+        Assert.Fail(
+            "The coordinator never reached a normal-stop state. " +
+            NormalStopWaitDiagnostic(coordinator));
         throw new InvalidOperationException("Unreachable normal-stop path.");
+    }
+
+    private static string NormalStopWaitDiagnostic(
+        RbpConnectionCoordinator coordinator)
+    {
+        object coordinatorSync = typeof(RbpConnectionCoordinator).GetField(
+            "_sync", BindingFlags.Instance | BindingFlags.NonPublic)?
+            .GetValue(coordinator) ?? throw new InvalidOperationException(
+                "Coordinator synchronization root was unavailable.");
+        lock (coordinatorSync)
+        {
+            RbpConnectionCoordinatorSnapshot snapshot =
+                coordinator.GetSnapshot();
+            Task<RbpCoordinatorTeardownResult>? retainedTeardown =
+                PrivateMemberValue(coordinator, "_retainedTeardownOwner") as
+                Task<RbpCoordinatorTeardownResult>;
+            object? teardownResultSource = PrivateMemberValue(
+                coordinator, "_teardownResult");
+            Task<RbpCoordinatorTeardownResult>? teardownResult =
+                PrivateMemberValue(teardownResultSource, "Task") as
+                Task<RbpCoordinatorTeardownResult>;
+            object? resources = PrivateMemberValue(
+                coordinator, "_attemptTeardownResources");
+            object? authorityPoisoned = PrivateMemberValue(
+                coordinator, "_connectionAuthorityPoisoned");
+            object? routeAuthorityEpoch = PrivateMemberValue(
+                resources, "RouteAuthorityEpoch");
+            object? shutdownRequested = PrivateMemberValue(
+                resources, "ShutdownRequested");
+            object? journalGenerationActivated = PrivateMemberValue(
+                resources, "JournalGenerationActivated");
+            object? deadline = PrivateMemberValue(
+                resources, "DeadlineTimestamp");
+            object? secondaryFault = PrivateMemberValue(
+                resources, "SecondaryFault");
+            return string.Join(
+                "; ",
+                $"rawStopState={AttemptStopState(coordinator)}",
+                $"authorityPoisoned={authorityPoisoned ?? "unavailable"}",
+                $"snapshotPhase={snapshot.Lifecycle.Phase}",
+                $"snapshotGeneration={snapshot.ConnectionGeneration}",
+                $"snapshotActiveConnection={snapshot.HasActiveConnection}",
+                $"snapshotRsids=[{string.Join(',', snapshot.ActiveRsids)}]",
+                $"snapshotOwnedTasks={snapshot.OwnedBackgroundTaskCount}",
+                $"snapshotInvocations={snapshot.ActiveInvocationCount}",
+                TeardownDiagnostic("retainedTeardown", retainedTeardown),
+                TeardownDiagnostic("teardownResult", teardownResult),
+                $"resourcesRouteAuthorityEpoch={routeAuthorityEpoch ?? "none"}",
+                $"resourcesShutdownRequested={shutdownRequested ?? "none"}",
+                $"resourcesJournalGenerationActivated=" +
+                $"{journalGenerationActivated ?? "none"}",
+                $"resourcesDeadline={deadline ?? "none"}",
+                $"resourcesSecondaryFault={ExceptionDiagnostic(secondaryFault)}");
+        }
+    }
+
+    private static string TeardownDiagnostic(
+        string name,
+        Task<RbpCoordinatorTeardownResult>? teardown)
+    {
+        if (teardown is null) return $"{name}Task=null; {name}Result=null";
+        if (teardown.IsCompletedSuccessfully)
+        {
+            RbpCoordinatorTeardownResult result = teardown.Result;
+            return $"{name}Task={teardown.Status}; {name}Result=" +
+                $"{result.Disposition}; {name}Deadline=" +
+                $"{result.DeadlineTimestamp?.ToString() ?? "none"}";
+        }
+
+        return $"{name}Task={teardown.Status}; {name}Result=unavailable; " +
+            $"{name}Fault={ExceptionDiagnostic(teardown.Exception)}";
+    }
+
+    private static string ExceptionDiagnostic(object? value) => value switch
+    {
+        null => "none",
+        Exception exception =>
+            $"{exception.GetType().Name}:{exception.Message}",
+        _ => value.ToString() ?? value.GetType().Name,
+    };
+
+    private static object? PrivateMemberValue(object? source, string name)
+    {
+        if (source is null) return null;
+        const BindingFlags flags = BindingFlags.Instance |
+            BindingFlags.Public | BindingFlags.NonPublic;
+        Type type = source.GetType();
+        return type.GetField(name, flags)?.GetValue(source) ??
+            type.GetProperty(name, flags)?.GetValue(source);
     }
 
     private sealed class MutableSessionCatalog : IRbpLocalSessionCatalog
