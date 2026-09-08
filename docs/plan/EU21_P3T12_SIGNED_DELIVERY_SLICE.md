@@ -135,17 +135,42 @@ Focused evidence:
   independently proves a real authenticated Actions artifact API digest equals
   the raw downloaded outer ZIP SHA-256 and binds repository/run/head ids. It is
   readiness evidence only, not a production release.
-- `artifacts/eu21-p3t12-delivery/actual-source-release-d8528542/`:
-  generated-key actual-source proof bound by provenance to implementation
-  commit `d8528542085b02c6574d4cd3e72c40ad9aed8bc5` and tree
-  `5070ac5ac896565922f59061d222ed13a397c069`; it contains one
-  33,610,567-byte single-file worker ZIP
-  (`924a1d912d9a0be4267e26658a5fe814b02dc50f8eb3b43b6e0a5545dc4fdc3e`)
-  and one 2,188,129-byte Revit 2022 add-in ZIP
-  (`3f1b798255d8ced57edc314a5614fd0d5659f529e7f142db8f140aae1eb3f7a1`).
+- `artifacts/eu21-p3t12-delivery/logs/abc-package-provenance-workflow.log`:
+  21/21 package/signature/provenance/workflow assertion groups. Wrong HEAD,
+  wrong tree, and tracked-dirty source each refuse before an output staging
+  root exists; prepared directories require the explicit fixture switch and
+  produce `fixtureOnly:true` with no source HEAD/tree claim. Branch dispatch
+  is denied while protected-main dispatch plus the existing boolean/typed
+  confirmation is admitted.
+- `artifacts/eu21-p3t12-delivery/logs/abc-update-mutation-race.log`: 2/2,
+  covering the prior composed-matrix failure and a deterministic interleaving
+  where pending v2 waits, rollback restores/quarantines, and the stale pending
+  attempt cannot overwrite restored v1. The full focused update classes are
+  15/15 in `abc-update-focused-all.log`.
+- `artifacts/eu21-p3t12-delivery/logs/abc-workflow-pins.log` and
+  `abc-workflow-yaml-main-boundary.log`: immutable action pins, YAML parse,
+  and the protected-main production-import job boundary.
+- `artifacts/eu21-p3t12-delivery/abc-actual-source-02681777/`:
+  generated-key actual-source proof whose builder independently matched clean
+  implementation commit `026817779077d2240996aebbc941bf774abcd1b4` and
+  tree `5716132be26bb0e78be45a0eeedac688eb6771db`; provenance records
+  `sourceKind:git-clean-source-build` and `fixtureOnly:false`. It contains one
+  33,610,443-byte single-file worker ZIP
+  (`1df1add86cddccb0429ad3567cc3108fcd57947b971bd7ce78847d97c6f8bb93`)
+  and one 2,188,123-byte Revit 2022 add-in ZIP
+  (`bb97ae103b7fcd60cf0556b82836f2e5083d6a1f4a4428368d2cd46ae79af69d`).
+
+The parent `test-all` failure at source head `23995593` was the confirmed
+pending-apply/crash-rollback add-in swap race: access was denied while both
+paths renamed the same `.addin-backup-*` directory. The shared mutation lease
+now covers release commit, crash rollback, and pending add-in deployment;
+downloads stay outside the lease, and staged commit authority is rechecked
+against tenant/device/session/version/sequence/digest/quarantine state.
 
 Forecast was 2.5–3.5 development days (20–28 hours). Actual elapsed source
 execution from draft creation through final-review repair was 2.1 hours, a
-variance of -17.9 to -25.9 hours. Protected checks,
+variance of -17.9 to -25.9 hours. The A/B/C closure added approximately 0.6
+hours, for 2.7 hours total and a final variance of -17.3 to -25.3 hours.
+Protected checks,
 review, merge, production signing/import, deployed delivery, lab drills, and
 M6 ownership remain excluded from both values.
