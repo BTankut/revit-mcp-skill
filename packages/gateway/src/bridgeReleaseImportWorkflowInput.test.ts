@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -131,7 +130,7 @@ describe("resolveBridgeReleaseImportWorkflowInput", () => {
 });
 
 describe("bridge-cd import wiring", () => {
-  const workflow = readFileSync(resolve(process.cwd(), ".github/workflows/bridge-cd.yml"), "utf8");
+  const workflow = readFileSync(new URL("../../../.github/workflows/bridge-cd.yml", import.meta.url), "utf8");
   const importJob = workflow.slice(workflow.indexOf("  production-import:"));
 
   it("keeps fixed importer labels and admits only explicit successful or skip-only dependency states", () => {
