@@ -137,6 +137,7 @@ describe("bridge-cd import wiring", () => {
   it("keeps fixed importer labels and admits only explicit successful or skip-only dependency states", () => {
     expect(importJob).toContain('["self-hosted","Linux","revagent-gateway-publish",{0}]');
     expect(importJob).toContain("toJSON(inputs.importer_runner_label)");
+    expect(importJob).toMatch(/if: >-\s+github\.event_name == 'workflow_dispatch' &&\s+github\.ref == 'refs\/heads\/main' &&\s+inputs\.publish_release == true &&\s+inputs\.publish_confirmation == 'PUBLISH_BRIDGE_UPDATE'/su);
     expect(importJob).toContain("!cancelled()");
     expect(importJob).toContain("needs.generated-key-validation.result == 'success'");
     expect(importJob).toContain("needs.production-sign.result == 'success'");

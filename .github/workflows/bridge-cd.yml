@@ -207,12 +207,12 @@ jobs:
   production-import:
     name: Gateway-host immutable import
     if: >-
-      always() &&
-      !cancelled() &&
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
       inputs.publish_release == true &&
       inputs.publish_confirmation == 'PUBLISH_BRIDGE_UPDATE' &&
+      always() &&
+      !cancelled() &&
       ((inputs.resume_existing_artifact != true &&
         needs.generated-key-validation.result == 'success' &&
         needs.production-sign.result == 'success') ||
