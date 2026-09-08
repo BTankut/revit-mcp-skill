@@ -56,6 +56,25 @@ allowed `bridgeReleaseImportCli.ts`, its test, `bridge-cd.yml`, and
 `eu12Persistence.integration.test.ts` own the Actions-receipt and retained-volume
 PostgreSQL 16 restart corrections; no other path is added.
 
+### Scope amendment — 2026-09-08 update mutation coordination
+
+The focused `test-all` run exposed an access-denied rename in the composed
+matrix while crash rollback and pending add-in apply could concurrently mutate
+the same add-in slot outside the update-state mutex. The exact allowlist is
+amended with these closely related runtime paths for one bounded common
+mutation/version guard and deterministic interleaving proof:
+
+- `packages/bridge/src/RevAgent.Bridge.Host/Update/BridgeUpdateEngine.cs`
+- `packages/bridge/src/RevAgent.Bridge.Host/Update/BridgeUpdateStateStore.cs`
+- `packages/bridge/src/RevAgent.Bridge.Host/Update/PendingAddinApplyService.cs`
+- `packages/bridge/src/RevAgent.Bridge.Host/Update/CrashLoopRollbackController.cs`
+
+Their already allowed focused update/composed tests may change. The guard must
+serialize only owned update filesystem/state mutations, preserve crash-loop
+rollback responsiveness, and refuse a pending add-in target that became stale
+or quarantined while waiting. It must not change ACLs, add sleeps, weaken
+assertions, or broaden into worker supervision or service behavior.
+
 Implemented within the exact allowlist:
 
 - WP3 `.NET 8` signer with strict RSA private/public-key matching, exact
