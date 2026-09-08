@@ -25,13 +25,16 @@ public sealed class ComposedBridgeUpdateMatrixTests
     [Fact]
     public async Task RealPollerConsumesGeneratedReleaseOverAuthenticatedLoopbackHttps()
     {
-        if (!OperatingSystem.IsWindows())
+        string? databaseUrl = Environment.GetEnvironmentVariable(
+            "EU21_COMPOSED_DATABASE_URL");
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(databaseUrl))
         {
             return;
         }
 
         string root = Path.Combine(Path.GetTempPath(), $"revagent-eu21-https-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
+        Process? gateway = null;
         try
         {
             InstallerFixture installer = await PrepareInstallerFixtureAsync(root);
@@ -39,11 +42,95 @@ public sealed class ComposedBridgeUpdateMatrixTests
             byte[] bridgeZip = Zip((BridgeInstallLayout.WorkerExecutableName, "https-worker"));
             byte[] addinZip = Zip(("2022/revAgentPlugin/revAgentPlugin.dll", "https-addin"));
             using RSA signingKey = ReadPrivateKey(installer.PrivateKeyPath);
-            await using var server = new LocalHttpsUpdateServer(bridgeZip, addinZip);
-            JObject manifest = Manifest(bridgeZip, addinZip, "2.0.0", 2, server.BaseUri);
+            int port = ReserveLoopbackPort();
+            var gatewayUri = new Uri($"https://127.0.0.1:{port}/");
+            JObject manifest = Manifest(
+                bridgeZip,
+                addinZip,
+                "2.0.0",
+                2,
+                gatewayUri,
+                "30000000-0000-4000-8000-000000000012");
             JObject envelope = Envelope(signingKey, manifest);
-            server.SetManifest(manifest, envelope);
-            await server.StartAsync();
+            string artifacts = Path.Combine(root, "gateway-artifact");
+            Directory.CreateDirectory(artifacts);
+            await File.WriteAllBytesAsync(Path.Combine(artifacts, "bridge.zip"), bridgeZip);
+            await File.WriteAllBytesAsync(Path.Combine(artifacts, "addin.zip"), addinZip);
+            await File.WriteAllTextAsync(
+                Path.Combine(artifacts, "bridge-manifest.json"),
+                manifest.ToString(Newtonsoft.Json.Formatting.None),
+                new UTF8Encoding(false));
+            await File.WriteAllTextAsync(
+                Path.Combine(artifacts, "bridge-manifest.signature.json"),
+                envelope.ToString(Newtonsoft.Json.Formatting.None),
+                new UTF8Encoding(false));
+            await File.WriteAllTextAsync(
+                Path.Combine(artifacts, "provenance.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    releaseId = "30000000-0000-4000-8000-000000000012",
+                    repository = "fixture/revAgent",
+                    headSha = new string('a', 40),
+                    headTree = new string('b', 40),
+                    createdAtUtc = "2026-09-08T00:00:00.0000000Z",
+                }),
+                new UTF8Encoding(false));
+            (string certificatePath, string keyPath, string thumbprint) =
+                WriteLoopbackTlsMaterial(root);
+            string readyPath = Path.Combine(root, "gateway-ready.json");
+            string stopPath = Path.Combine(root, "gateway-stop");
+            string resultPath = Path.Combine(root, "gateway-result.json");
+            string repo = FindRepoRoot();
+            string node = Environment.GetEnvironmentVariable("EU21_NODE_EXE") ?? "node";
+            var start = new ProcessStartInfo
+            {
+                FileName = node,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            start.Environment["REVAGENT_P3T12_COMPOSED_FIXTURE"] =
+                "generated-local-only";
+            foreach (string argument in new[]
+            {
+                Path.Combine(repo, "packages", "gateway", "dist", "bridgeUpdateComposedFixtureCli.js"),
+                "--database-url", databaseUrl,
+                "--artifact-root", artifacts,
+                "--object-root", Path.Combine(root, "objects"),
+                "--trusted-keys", installer.TrustedKeysPath,
+                "--tls-cert", certificatePath,
+                "--tls-key", keyPath,
+                "--ready-file", readyPath,
+                "--stop-file", stopPath,
+                "--result-file", resultPath,
+                "--repository", "fixture/revAgent",
+                "--head-sha", new string('a', 40),
+                "--port", port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            })
+            {
+                start.ArgumentList.Add(argument);
+            }
+            gateway = Process.Start(start) ??
+                throw new InvalidOperationException("Composed Gateway fixture did not start.");
+            Task<string> gatewayOutput = gateway.StandardOutput.ReadToEndAsync();
+            Task<string> gatewayError = gateway.StandardError.ReadToEndAsync();
+            using var startupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            while (!File.Exists(readyPath))
+            {
+                if (gateway.HasExited)
+                {
+                    throw new InvalidOperationException(
+                        "Composed Gateway fixture exited before readiness: " +
+                        await gatewayError);
+                }
+                await Task.Delay(25, startupTimeout.Token);
+            }
+            GatewayFixtureReady ready = JsonSerializer.Deserialize<GatewayFixtureReady>(
+                await File.ReadAllTextAsync(readyPath),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ??
+                throw new InvalidDataException("Composed Gateway readiness is empty.");
 
             await using var log = new NullBridgeLog();
             var state = new BridgeUpdateStateStore(layout);
@@ -53,21 +140,21 @@ public sealed class ComposedBridgeUpdateMatrixTests
             await using var supervisor = new WorkerSupervisor(layout, launcher, log, rollbackController: rollback);
             var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
             handler.ServerCertificateCustomValidationCallback = (_, certificate, _, errors) =>
-                errors == SslPolicyErrors.None || certificate?.GetCertHashString() == server.CertificateThumbprint;
+                errors == SslPolicyErrors.None || certificate?.GetCertHashString() == thumbprint;
             var poller = new BridgeUpdatePollingService(
                 layout, state, supervisor, log, reports,
                 httpClientFactory: () => new HttpClient(handler, disposeHandler: false),
                 revit: new MutableRevitProbe());
-            string machineFingerprint = "sha256:" + new string('d', 64);
-            string deviceId = "10000000-0000-4000-8000-000000000003";
+            string machineFingerprint = ready.MachineFingerprint;
+            string deviceId = ready.DeviceId;
             var principal = new BridgeUpdatePrincipal(
                 BridgeUpdatePollingService.CreateTenantBinding(machineFingerprint, deviceId),
                 deviceId,
                 "30000000-0000-4000-8000-000000000001");
             var context = new BridgeUpdatePollContext(
-                server.BaseUri,
+                new Uri(ready.Uri),
                 principal,
-                "generated-https-device-token",
+                ready.DeviceToken,
                 machineFingerprint,
                 BridgeUpdatePollingService.LoadTrustedKeys(installer.TrustedKeysPath),
                 "1.0.0");
@@ -78,16 +165,47 @@ public sealed class ComposedBridgeUpdateMatrixTests
                 WorkerExecutableResolver.Resolve(layout).ExecutablePath));
             Assert.Equal("https-addin", await File.ReadAllTextAsync(Path.Combine(
                 layout.AddinRoot, "2022", "revAgentPlugin", "revAgentPlugin.dll")));
-            Assert.Equal(3, server.Requests.Count);
-            Assert.All(server.Requests, request =>
+            await File.WriteAllTextAsync(stopPath, "stop", new UTF8Encoding(false));
+            using var stopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            await gateway.WaitForExitAsync(stopTimeout.Token);
+            Assert.Equal(0, gateway.ExitCode);
+            Assert.True(string.IsNullOrWhiteSpace(await gatewayOutput));
+            Assert.True(string.IsNullOrWhiteSpace(await gatewayError));
+            GatewayFixtureResult fixtureResult = JsonSerializer.Deserialize<GatewayFixtureResult>(
+                await File.ReadAllTextAsync(resultPath),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ??
+                throw new InvalidDataException("Composed Gateway result is empty.");
+            Console.WriteLine(JsonSerializer.Serialize(new
             {
-                Assert.Equal("Bearer generated-https-device-token", request.Authorization);
-                Assert.Equal(deviceId, request.DeviceId);
-                Assert.Equal(machineFingerprint, request.MachineFingerprint);
-            });
+                p3t12ComposedGateway = fixtureResult,
+            }));
+            Assert.Equal(new[]
+            {
+                "/bridge/update/manifest",
+                "/bridge/update/artifact/30000000-0000-4000-8000-000000000012/bridge",
+                "/bridge/update/artifact/30000000-0000-4000-8000-000000000012/addin",
+            }, fixtureResult.Requests);
+            Assert.Equal("30000000-0000-4000-8000-000000000012", fixtureResult.ReleaseId);
+            Assert.Equal(2, fixtureResult.ReleaseSequence);
+            Assert.Equal(2, fixtureResult.RollbackFloorSequence);
+            Assert.Equal(CanonicalJson.Sha256Hex(manifest), fixtureResult.ManifestDigest, ignoreCase: true);
+            Assert.Equal(0, fixtureResult.DeviceRing);
+            Assert.Equal(new[]
+            {
+                "M5EnrollmentEntitlementControlPlane",
+                "PostgresEu12DataStore",
+                "FilesystemBridgeReleaseObjectStore",
+                "createBridgeUpdateEndpoint",
+            }, fixtureResult.AuthorityChain);
         }
         finally
         {
+            if (gateway is { HasExited: false })
+            {
+                gateway.Kill(entireProcessTree: true);
+                await gateway.WaitForExitAsync();
+            }
+            gateway?.Dispose();
             if (Directory.Exists(root))
             {
                 Directory.Delete(root, recursive: true);
@@ -324,20 +442,63 @@ public sealed class ComposedBridgeUpdateMatrixTests
         throw new DirectoryNotFoundException("Repository root was not found.");
     }
 
+    private static int ReserveLoopbackPort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    private static (string CertificatePath, string KeyPath, string Thumbprint)
+        WriteLoopbackTlsMaterial(string root)
+    {
+        using RSA rsa = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=127.0.0.1",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        var names = new SubjectAlternativeNameBuilder();
+        names.AddIpAddress(IPAddress.Loopback);
+        request.CertificateExtensions.Add(names.Build());
+        using X509Certificate2 certificate = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow.AddHours(1));
+        string certificatePath = Path.Combine(root, "gateway-cert.pem");
+        string keyPath = Path.Combine(root, "gateway-key.pem");
+        File.WriteAllText(
+            certificatePath,
+            certificate.ExportCertificatePem(),
+            new UTF8Encoding(false));
+        File.WriteAllText(
+            keyPath,
+            rsa.ExportPkcs8PrivateKeyPem(),
+            new UTF8Encoding(false));
+        return (certificatePath, keyPath, certificate.GetCertHashString());
+    }
+
     private static JObject Manifest(
         byte[] bridge,
         byte[] addin,
         string version,
         long sequence,
-        Uri? artifactBase = null) => new()
+        Uri? artifactBase = null,
+        string releaseId = "release") => new()
         {
             ["schemaVersion"] = 1,
             ["channel"] = "stable",
             ["version"] = version,
             ["releaseSequence"] = sequence,
             ["components"] = new JArray(
-            Component("bridge", version, artifactBase is null ? "https://objects.example.test/bridge.zip" : new Uri(artifactBase, "/bridge/update/artifact/release/bridge").AbsoluteUri, bridge),
-            Component("addin", version, artifactBase is null ? "https://objects.example.test/addin.zip" : new Uri(artifactBase, "/bridge/update/artifact/release/addin").AbsoluteUri, addin)),
+            Component("bridge", version, artifactBase is null ? "https://objects.example.test/bridge.zip" : new Uri(artifactBase, $"/bridge/update/artifact/{releaseId}/bridge").AbsoluteUri, bridge),
+            Component("addin", version, artifactBase is null ? "https://objects.example.test/addin.zip" : new Uri(artifactBase, $"/bridge/update/artifact/{releaseId}/addin").AbsoluteUri, addin)),
             ["rolloutPercent"] = 100,
             ["minSupportedVersion"] = "1.0.0",
             ["notes"] = "composed EU-21 matrix",
@@ -429,6 +590,21 @@ public sealed class ComposedBridgeUpdateMatrixTests
         string PrivateKeyPath,
         string TrustedKeysPath);
 
+    private sealed record GatewayFixtureReady(
+        string Uri,
+        string DeviceId,
+        string MachineFingerprint,
+        string DeviceToken);
+
+    private sealed record GatewayFixtureResult(
+        string[] Requests,
+        string ReleaseId,
+        long ReleaseSequence,
+        long RollbackFloorSequence,
+        string ManifestDigest,
+        int DeviceRing,
+        string[] AuthorityChain);
+
     private sealed class MutableRevitProbe : IRevitProcessProbe
     {
         internal bool IsRunning { get; set; }
@@ -508,130 +684,6 @@ public sealed class ComposedBridgeUpdateMatrixTests
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json"),
             });
-    }
-
-    private sealed record HttpsRequest(
-        string Path,
-        string? Authorization,
-        string? DeviceId,
-        string? MachineFingerprint);
-
-    private sealed class LocalHttpsUpdateServer : IAsyncDisposable
-    {
-        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
-        private readonly CancellationTokenSource _stop = new();
-        private readonly X509Certificate2 _certificate;
-        private readonly byte[] _bridge;
-        private readonly byte[] _addin;
-        private Task? _server;
-        private JObject? _manifest;
-        private JObject? _envelope;
-
-        internal LocalHttpsUpdateServer(byte[] bridge, byte[] addin)
-        {
-            _bridge = bridge;
-            _addin = addin;
-            using RSA rsa = RSA.Create(2048);
-            var request = new CertificateRequest(
-                "CN=127.0.0.1",
-                rsa,
-                HashAlgorithmName.SHA256,
-                RSASignaturePadding.Pkcs1);
-            var names = new SubjectAlternativeNameBuilder();
-            names.AddIpAddress(IPAddress.Loopback);
-            request.CertificateExtensions.Add(names.Build());
-            using X509Certificate2 generated = request.CreateSelfSigned(
-                DateTimeOffset.UtcNow.AddMinutes(-1),
-                DateTimeOffset.UtcNow.AddHours(1));
-            _certificate = new X509Certificate2(generated.Export(X509ContentType.Pfx));
-            _listener.Start();
-            BaseUri = new Uri($"https://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/");
-        }
-
-        internal Uri BaseUri { get; }
-        internal string CertificateThumbprint => _certificate.GetCertHashString();
-        internal List<HttpsRequest> Requests { get; } = [];
-
-        internal void SetManifest(JObject manifest, JObject envelope)
-        {
-            _manifest = manifest;
-            _envelope = envelope;
-        }
-
-        internal Task StartAsync()
-        {
-            _server = ServeAsync(_stop.Token);
-            return Task.CompletedTask;
-        }
-
-        private async Task ServeAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                while (!cancellationToken.IsCancellationRequested)
-                {
-                    using TcpClient client = await _listener.AcceptTcpClientAsync(cancellationToken);
-                    await using var tls = new SslStream(client.GetStream(), leaveInnerStreamOpen: false);
-                    await tls.AuthenticateAsServerAsync(
-                        _certificate,
-                        clientCertificateRequired: false,
-                        enabledSslProtocols: System.Security.Authentication.SslProtocols.Tls12 |
-                            System.Security.Authentication.SslProtocols.Tls13,
-                        checkCertificateRevocation: false);
-                    using var reader = new StreamReader(tls, Encoding.ASCII, false, 4096, leaveOpen: true);
-                    string requestLine = await reader.ReadLineAsync(cancellationToken) ?? string.Empty;
-                    var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    while (await reader.ReadLineAsync(cancellationToken) is string line && line.Length != 0)
-                    {
-                        int colon = line.IndexOf(':');
-                        if (colon > 0) headers[line[..colon].Trim()] = line[(colon + 1)..].Trim();
-                    }
-                    string path = requestLine.Split(' ', StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1) ?? string.Empty;
-                    Requests.Add(new HttpsRequest(
-                        path,
-                        headers.GetValueOrDefault("Authorization"),
-                        headers.GetValueOrDefault("x-revagent-device-id"),
-                        headers.GetValueOrDefault("x-revagent-machine-fingerprint")));
-                    byte[] body;
-                    string contentType;
-                    if (path == "/bridge/update/manifest")
-                    {
-                        body = Encoding.UTF8.GetBytes(new JObject
-                        {
-                            ["manifest"] = _manifest!.DeepClone(),
-                            ["signatureEnvelope"] = _envelope!.DeepClone(),
-                            ["deviceRing"] = 1,
-                        }.ToString(Newtonsoft.Json.Formatting.None));
-                        contentType = "application/json";
-                    }
-                    else
-                    {
-                        body = path.EndsWith("/bridge", StringComparison.Ordinal) ? _bridge : _addin;
-                        contentType = "application/zip";
-                    }
-                    byte[] response = Encoding.ASCII.GetBytes(
-                        $"HTTP/1.1 200 OK\r\nContent-Type: {contentType}\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
-                    await tls.WriteAsync(response, cancellationToken);
-                    await tls.WriteAsync(body, cancellationToken);
-                    await tls.FlushAsync(cancellationToken);
-                }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-            }
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            _stop.Cancel();
-            _listener.Stop();
-            if (_server is not null)
-            {
-                try { await _server; } catch (SocketException) when (_stop.IsCancellationRequested) { }
-            }
-            _certificate.Dispose();
-            _stop.Dispose();
-        }
     }
 
     private sealed class ComposedWorkerLauncher : IWorkerProcessLauncher

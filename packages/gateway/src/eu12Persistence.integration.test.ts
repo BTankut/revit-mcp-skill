@@ -1,4 +1,6 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 import { canonicalizeJson, type JsonValue } from "@revagent/protocol";
 
@@ -15,8 +17,43 @@ import { Eu12EventBackpressureError } from "./eventPersistence.js";
 import { bridgeManifestDigest, verifyBridgeManifestSignature } from "./bridgeManifestSignature.js";
 
 const { Pool } = pg;
+const execFileAsync = promisify(execFile);
 const DATABASE_URL = process.env.EU10_DATABASE_URL;
 const suite = DATABASE_URL === undefined ? describe.skip : describe;
+
+async function inspectOwnedPostgresFixture(container: string, volume: string) {
+  if (!/^[a-z0-9][a-z0-9_.-]{0,63}$/u.test(container) || !/^[a-z0-9][a-z0-9_.-]{0,63}$/u.test(volume)) {
+    throw new Error("owned PostgreSQL restart fixture identity is invalid");
+  }
+  const inspected = JSON.parse((await execFileAsync("docker", ["inspect", container], { windowsHide: true })).stdout) as unknown;
+  if (!Array.isArray(inspected) || inspected.length !== 1 || typeof inspected[0] !== "object" || inspected[0] === null) {
+    throw new Error("owned PostgreSQL restart fixture is unavailable");
+  }
+  const row = inspected[0] as { readonly Id?: unknown; readonly State?: { readonly StartedAt?: unknown }; readonly Mounts?: readonly { readonly Type?: unknown; readonly Name?: unknown; readonly Destination?: unknown }[] };
+  const mount = row.Mounts?.find((candidate) => candidate.Destination === "/var/lib/postgresql/data");
+  if (typeof row.Id !== "string" || !/^[0-9a-f]{64}$/u.test(row.Id) || typeof row.State?.StartedAt !== "string" ||
+      mount?.Type !== "volume" || mount.Name !== volume) {
+    throw new Error("owned PostgreSQL restart fixture lacks its exact retained volume");
+  }
+  return Object.freeze({ containerId: row.Id, startedAt: row.State.StartedAt, volume: mount.Name });
+}
+
+async function waitForPostgresAfterRestart(databaseUrl: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const probe = new Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 500 });
+    try {
+      await probe.query("SELECT 1");
+      await probe.end();
+      return;
+    } catch (error) {
+      lastError = error;
+      await probe.end().catch(() => undefined);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("PostgreSQL did not recover after owned restart");
+}
 
 function envelope(input: {
   readonly eventId: string;
@@ -819,17 +856,61 @@ suite("EU-12 Postgres event persistence", () => {
       release: { id: releaseId, releaseSequence: 420 },
     });
     await publisher.close();
+    const restartContainer = process.env.EU21_POSTGRES_RESTART_CONTAINER;
+    const restartVolume = process.env.EU21_POSTGRES_RESTART_VOLUME;
+    let restartEvidence: Readonly<{
+      readonly containerId: string;
+      readonly volume: string;
+      readonly startedAtBefore: string;
+      readonly startedAtAfter: string;
+    }> | null = null;
+    if ((restartContainer === undefined) !== (restartVolume === undefined)) {
+      throw new Error("PostgreSQL restart fixture requires both exact container and volume identities");
+    }
+    if (restartContainer !== undefined && restartVolume !== undefined) {
+      const beforeRestart = await inspectOwnedPostgresFixture(restartContainer, restartVolume);
+      await store.close();
+      await runtime.end();
+      await admin.end();
+      await execFileAsync("docker", ["stop", "--time", "10", restartContainer], { windowsHide: true });
+      await execFileAsync("docker", ["start", restartContainer], { windowsHide: true });
+      await waitForPostgresAfterRestart(DATABASE_URL!);
+      const afterRestart = await inspectOwnedPostgresFixture(restartContainer, restartVolume);
+      expect(afterRestart.containerId).toBe(beforeRestart.containerId);
+      expect(afterRestart.volume).toBe(beforeRestart.volume);
+      expect(afterRestart.startedAt).not.toBe(beforeRestart.startedAt);
+      restartEvidence = Object.freeze({
+        containerId: afterRestart.containerId,
+        volume: afterRestart.volume,
+        startedAtBefore: beforeRestart.startedAt,
+        startedAtAfter: afterRestart.startedAt,
+      });
+      admin = new Pool({ connectionString: DATABASE_URL });
+      runtime = new Pool({ connectionString: runtimeDatabaseUrl });
+      store = new PostgresTenantStore(runtimeDatabaseUrl);
+    }
     const restarted = new PostgresEu12DataStore({
       databaseUrl: runtimeDatabaseUrl, objects, signatureVerifier: { verify: () => false },
       pinnedSigningKeyIds: ["generated-p3t12"], bridgeManifestVerifier,
     });
-    await expect(restarted.readBridgeUpdateForDevice({ tenantId: tenantA, deviceId })).resolves.toMatchObject({
+    const afterRestartRelease = await restarted.readBridgeUpdateForDevice({ tenantId: tenantA, deviceId });
+    expect(afterRestartRelease).toMatchObject({
       deviceRing: 0,
       release: { id: releaseId, releaseSequence: 420, manifestDigest: bridgeManifestDigest(manifest),
         components: { bridge: { sha256: "a".repeat(64), sizeBytes: 101 }, addin: { sha256: "b".repeat(64), sizeBytes: 202 } } },
     });
+    if (restartEvidence !== null) {
+      process.stdout.write(`${JSON.stringify({
+        p3t12PostgresRestart: restartEvidence,
+        releaseId,
+        releaseSequence: afterRestartRelease?.release.releaseSequence,
+        rollbackFloorSequence: afterRestartRelease?.release.rollbackFloorSequence,
+        tenantIds: firstAuthority.tenantIds,
+        deviceRing: afterRestartRelease?.deviceRing,
+      })}\n`);
+    }
     await restarted.close();
-  }, 30_000);
+  }, 60_000);
 
   it("upgrades multiple legacy result refs deterministically before the R17 uniqueness constraint", async () => {
     const databaseName = `eu12_legacy_${randomBytes(8).toString("hex")}`;

@@ -34,8 +34,8 @@ Hedef | Plan satırı | Kabul | Kapsam | Forecast
 
 ## Local source candidate checkpoint — 2026-09-08
 
-Status: repair in progress after final review. Scope amendment: composition
-fixture entrypoint below.
+Status: locally green final-review repair candidate. Scope amendment:
+composition fixture entrypoint below.
 
 ### Scope amendment — 2026-09-08 final-review composition fixture
 
@@ -79,28 +79,43 @@ Implemented within the exact allowlist:
   production signing and Gateway import require separate booleans, typed
   confirmations, runner labels, protected environments, and exact artifact
   id/digest/repository/run/head bindings.
+- Production import authenticates repository and artifact metadata directly at
+  the fixed GitHub API origin, binds artifact id/digest, repository ids,
+  workflow run and head SHA, then downloads and hashes the raw outer ZIP via a
+  credential-free signed redirect before parsing its five allowlisted entries.
 
 Focused evidence:
 
 - `artifacts/eu21-p3t12-delivery/logs/bridge-build.log`: Bridge solution build,
   zero warnings/errors.
 - `artifacts/eu21-p3t12-delivery/logs/signer-tests.log`: 4/4 signer tests.
-- `artifacts/eu21-p3t12-delivery/logs/bridge-update-tests.log`: 14/14 update
-  engine/composed tests, including generated-release consumption through a
-  real loopback TLS server and exact same-origin claims.
+- `artifacts/eu21-p3t12-delivery/logs/real-gateway-composed-poller.log`: 1/1
+  cross-process composed test. The real poller traverses generated-key local
+  import, `PostgresEu12DataStore`, `FilesystemBridgeReleaseObjectStore`, the
+  M5 enrollment/device/seat authority, `createBridgeUpdateEndpoint`, and
+  loopback TLS for manifest plus both authenticated artifact reads.
 - `artifacts/eu21-p3t12-delivery/logs/package-signer-parity.log`: 12 assertions;
   signer/oracle canonical bytes, digest, fingerprint and deterministic RS256
   parity; deterministic packages; private-key containment; frozen hashes.
-- `artifacts/eu21-p3t12-delivery/logs/gateway-delivery-tests.log`: 9/9 focused
-  signature/object/import/endpoint tests; Gateway lint and build logs are
-  adjacent.
-- `artifacts/eu21-p3t12-delivery/logs/postgres-eu12-delivery-restart.log`: 9/9
-  migrations/persistence tests against a fresh loopback-only PostgreSQL 17
-  fixture. The restart predicate closes/recreates the EU12 store and database
-  pools against the same running disposable PostgreSQL server; it is a Gateway
-  process/store restart proof, not a PostgreSQL server-restart claim.
-- `artifacts/eu21-p3t12-delivery/logs/workflow-action-pins.log` and
-  `workflow-yaml.log`: immutable action pins and three-job YAML parse.
+- `artifacts/eu21-p3t12-delivery/logs/review-repair-gateway-focused.log`: 14/14
+  focused signature/object/import/endpoint tests, including one authenticated
+  Actions archive success and id/digest/repository/run/head negatives before
+  any object or database publication. Adjacent repair logs prove Gateway lint,
+  build, and full test-aware typecheck.
+- `artifacts/eu21-p3t12-delivery/logs/postgres16-retained-volume-restart.log`:
+  9/9 migrations/persistence tests against one loopback-only PostgreSQL 16
+  container. The test closes every owned pool, stops and starts the same
+  container, proves its 64-hex container id is unchanged, proves its exact
+  named data volume remains mounted, proves `StartedAt` changed, reconnects,
+  and reads the same release identity/sequence/floor/targets/ring.
+- `artifacts/eu21-p3t12-delivery/logs/review-repair-workflow-pins.log` and
+  `review-repair-workflow-yaml.log`: immutable action pins and three-job YAML
+  parse after the authenticated Actions importer change.
+- Parent read-only evidence
+  `.orchestration/autopilot-v2/artifacts/EU-21/astra/p3t12-420/actions-artifact-readonly-proof/READONLY-ARTIFACT-BINDING.json`
+  independently proves a real authenticated Actions artifact API digest equals
+  the raw downloaded outer ZIP SHA-256 and binds repository/run/head ids. It is
+  readiness evidence only, not a production release.
 - `artifacts/eu21-p3t12-delivery/actual-source-release-d8528542/`:
   generated-key actual-source proof bound by provenance to implementation
   commit `d8528542085b02c6574d4cd3e72c40ad9aed8bc5` and tree
@@ -111,7 +126,7 @@ Focused evidence:
   (`3f1b798255d8ced57edc314a5614fd0d5659f529e7f142db8f140aae1eb3f7a1`).
 
 Forecast was 2.5–3.5 development days (20–28 hours). Actual elapsed source
-execution from draft creation to this checkpoint was 1.0 hour (0.125 of an
-8-hour development day), a variance of -19 to -27 hours. Protected checks,
+execution from draft creation through final-review repair was 2.1 hours, a
+variance of -17.9 to -25.9 hours. Protected checks,
 review, merge, production signing/import, deployed delivery, lab drills, and
 M6 ownership remain excluded from both values.

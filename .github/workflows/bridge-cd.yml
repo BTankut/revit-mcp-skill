@@ -197,14 +197,6 @@ jobs:
         with:
           node-version: 24.14.1
           cache: npm
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          artifact-ids: ${{ needs.production-sign.outputs.artifact-id }}
-          repository: ${{ github.repository }}
-          run-id: ${{ github.run_id }}
-          path: artifacts/import
-          merge-multiple: true
-          digest-mismatch: error
       - run: npm ci --ignore-scripts
       - name: Build and apply the pinned migration set
         env:
@@ -213,6 +205,7 @@ jobs:
       - name: Import exact signed release and channel authority
         env:
           DATABASE_URL: ${{ secrets.BRIDGE_RELEASE_PUBLISHER_DATABASE_URL }}
+          GITHUB_TOKEN: ${{ github.token }}
           OBJECT_STORE_ROOT: ${{ vars.OBJECT_STORE_ROOT }}
           TRUSTED_KEYS_PATH: ${{ vars.BRIDGE_RELEASE_TRUSTED_KEYS_PATH }}
           ARTIFACT_ID: ${{ needs.production-sign.outputs.artifact-id }}
@@ -223,10 +216,10 @@ jobs:
           node packages/gateway/dist/bridgeReleaseImportCli.js
           --publish true
           --confirm PUBLISH_BRIDGE_UPDATE
-          --artifact-root artifacts/import
           --artifact-id "$ARTIFACT_ID"
           --artifact-digest "$ARTIFACT_DIGEST"
           --repository "$GITHUB_REPOSITORY"
+          --run-id "$GITHUB_RUN_ID"
           --head-sha "$GITHUB_SHA"
           --object-store-root "$OBJECT_STORE_ROOT"
           --trusted-keys "$TRUSTED_KEYS_PATH"
