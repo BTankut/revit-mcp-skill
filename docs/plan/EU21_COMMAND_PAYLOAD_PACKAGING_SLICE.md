@@ -1,11 +1,11 @@
 # EU21 command payload packaging slice
 
 Hedef | Plan satırı | Kabul | Kapsam | Forecast
-Command payload survives signed add-in replacement | EU21 source-package repair | Clean-source addin.zip carries the canonical registry, descriptor, and Revit 2022 command-set DLL; missing shape fails closed; focused replacement proof and a real generated-test-key package are green | `packages/bridge/scripts/build-signed-bridge-update.ps1`, `packages/bridge/scripts/test-signed-bridge-update.ps1`, `docs/plan/EU21_COMMAND_PAYLOAD_PACKAGING_SLICE.md` | 90 minutes
+Command payload survives signed add-in replacement | EU21 source-package repair | Clean-source addin.zip carries the canonical registry, descriptor, and Revit 2022 command-set DLL; missing shape fails closed; focused replacement proof and a real generated-test-key package are green | `packages/bridge/scripts/build-signed-bridge-update.ps1`, `packages/bridge/scripts/test-signed-bridge-update.ps1`, `packages/bridge/tests/RevAgent.Bridge.Tests/Update/BridgeUpdateEngineTests.cs`, `docs/plan/EU21_COMMAND_PAYLOAD_PACKAGING_SLICE.md` | 90 minutes
 
 ## Boundary
 
-This slice changes only signed bridge update packaging and its focused generated-key test. It preserves `scripts/build-revit-plugin.ps1`, production runtime lifecycle and transport code, frozen installer/runtime source, `src/revit-plugin`, the legacy signed-source-free workflow, and DistributionIntegrity.
+This slice changes only signed bridge update packaging, its focused generated-key test, and one existing Host test that directly exercises `BridgeUpdateEngine.DeployAddinSlot`. It preserves `scripts/build-revit-plugin.ps1`, production runtime lifecycle and transport code, frozen installer/runtime source, `src/revit-plugin`, the legacy signed-source-free workflow, and DistributionIntegrity.
 
 The builder must assemble the command payload from the same clean Git source and build outputs as the add-in package. Required installer-relative paths are:
 
