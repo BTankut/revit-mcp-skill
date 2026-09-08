@@ -202,8 +202,209 @@ public sealed partial class RbpConnectionCoordinatorTests
             await Task.Delay(5);
         }
 
-        Assert.Fail("The coordinator never reached a normal-stop state.");
+        Assert.Fail(
+            "The coordinator never reached a normal-stop state. " +
+            NormalStopWaitDiagnostic(coordinator));
         throw new InvalidOperationException("Unreachable normal-stop path.");
+    }
+
+    private static async Task ExecuteWithFailurePreservingCoordinatorCleanupAsync(
+        RbpConnectionCoordinator coordinator,
+        CancellationTokenSource stop,
+        Task run,
+        Func<Task> operation,
+        Func<Task>? afterCleanup = null)
+    {
+        Exception? primaryFailure = null;
+        try
+        {
+            await operation();
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+            throw;
+        }
+        finally
+        {
+            if (!run.IsCompleted)
+            {
+                Exception? cleanupFailure =
+                    await StopCoordinatorAfterFailureAsync(
+                        coordinator, stop, run);
+                if (afterCleanup is not null)
+                {
+                    try
+                    {
+                        await afterCleanup();
+                    }
+                    catch (Exception exception)
+                    {
+                        cleanupFailure = CombineCleanupFailures(
+                            cleanupFailure, exception);
+                    }
+                }
+
+                if (cleanupFailure is not null)
+                {
+                    if (primaryFailure is null) throw cleanupFailure;
+                    primaryFailure.Data["normal-stop-cleanup-failure"] =
+                        ExceptionDiagnostic(cleanupFailure);
+                }
+            }
+        }
+    }
+
+    private static async Task<Exception?> StopCoordinatorAfterFailureAsync(
+        RbpConnectionCoordinator coordinator,
+        CancellationTokenSource stop,
+        Task run)
+    {
+        Exception? cleanupFailure = null;
+        Task<RbpCoordinatorTeardownResult>? teardown = null;
+        RbpCoordinatorTeardownResult? result = null;
+        try
+        {
+            teardown = coordinator.RequestStopTeardown();
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = CombineCleanupFailures(cleanupFailure, exception);
+        }
+
+        try
+        {
+            stop.Cancel();
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = CombineCleanupFailures(cleanupFailure, exception);
+        }
+
+        if (teardown is not null)
+        {
+            try
+            {
+                result = await teardown.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (Exception exception)
+            {
+                cleanupFailure = CombineCleanupFailures(
+                    cleanupFailure, exception);
+            }
+        }
+
+        try
+        {
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (RbpCoordinatorException) when (
+            result?.Disposition ==
+                RbpCoordinatorTeardownDisposition.EmergencyMustExit)
+        {
+            // The primary failure remains authoritative; this is the expected
+            // terminal signal from fail-closed coordinator cleanup.
+        }
+        catch (Exception exception)
+        {
+            cleanupFailure = CombineCleanupFailures(cleanupFailure, exception);
+        }
+
+        return cleanupFailure;
+    }
+
+    private static Exception CombineCleanupFailures(
+        Exception? existing,
+        Exception next) => existing is null ? next :
+        new AggregateException(existing, next);
+
+    private static string NormalStopWaitDiagnostic(
+        RbpConnectionCoordinator coordinator)
+    {
+        object coordinatorSync = typeof(RbpConnectionCoordinator).GetField(
+            "_sync", BindingFlags.Instance | BindingFlags.NonPublic)?
+            .GetValue(coordinator) ?? throw new InvalidOperationException(
+                "Coordinator synchronization root was unavailable.");
+        lock (coordinatorSync)
+        {
+            RbpConnectionCoordinatorSnapshot snapshot =
+                coordinator.GetSnapshot();
+            Task<RbpCoordinatorTeardownResult>? retainedTeardown =
+                PrivateMemberValue(coordinator, "_retainedTeardownOwner") as
+                Task<RbpCoordinatorTeardownResult>;
+            object? teardownResultSource = PrivateMemberValue(
+                coordinator, "_teardownResult");
+            Task<RbpCoordinatorTeardownResult>? teardownResult =
+                PrivateMemberValue(teardownResultSource, "Task") as
+                Task<RbpCoordinatorTeardownResult>;
+            object? resources = PrivateMemberValue(
+                coordinator, "_attemptTeardownResources");
+            object? authorityPoisoned = PrivateMemberValue(
+                coordinator, "_connectionAuthorityPoisoned");
+            object? routeAuthorityEpoch = PrivateMemberValue(
+                resources, "RouteAuthorityEpoch");
+            object? shutdownRequested = PrivateMemberValue(
+                resources, "ShutdownRequested");
+            object? journalGenerationActivated = PrivateMemberValue(
+                resources, "JournalGenerationActivated");
+            object? deadline = PrivateMemberValue(
+                resources, "DeadlineTimestamp");
+            object? secondaryFault = PrivateMemberValue(
+                resources, "SecondaryFault");
+            return string.Join(
+                "; ",
+                $"rawStopState={AttemptStopState(coordinator)}",
+                $"authorityPoisoned={authorityPoisoned ?? "unavailable"}",
+                $"snapshotPhase={snapshot.Lifecycle.Phase}",
+                $"snapshotGeneration={snapshot.ConnectionGeneration}",
+                $"snapshotActiveConnection={snapshot.HasActiveConnection}",
+                $"snapshotRsids=[{string.Join(',', snapshot.ActiveRsids)}]",
+                $"snapshotOwnedTasks={snapshot.OwnedBackgroundTaskCount}",
+                $"snapshotInvocations={snapshot.ActiveInvocationCount}",
+                TeardownDiagnostic("retainedTeardown", retainedTeardown),
+                TeardownDiagnostic("teardownResult", teardownResult),
+                $"resourcesRouteAuthorityEpoch={routeAuthorityEpoch ?? "none"}",
+                $"resourcesShutdownRequested={shutdownRequested ?? "none"}",
+                $"resourcesJournalGenerationActivated=" +
+                $"{journalGenerationActivated ?? "none"}",
+                $"resourcesDeadline={deadline ?? "none"}",
+                $"resourcesSecondaryFault={ExceptionDiagnostic(secondaryFault)}");
+        }
+    }
+
+    private static string TeardownDiagnostic(
+        string name,
+        Task<RbpCoordinatorTeardownResult>? teardown)
+    {
+        if (teardown is null) return $"{name}Task=null; {name}Result=null";
+        if (teardown.IsCompletedSuccessfully)
+        {
+            RbpCoordinatorTeardownResult result = teardown.Result;
+            return $"{name}Task={teardown.Status}; {name}Result=" +
+                $"{result.Disposition}; {name}Deadline=" +
+                $"{result.DeadlineTimestamp?.ToString() ?? "none"}";
+        }
+
+        return $"{name}Task={teardown.Status}; {name}Result=unavailable; " +
+            $"{name}Fault={ExceptionDiagnostic(teardown.Exception)}";
+    }
+
+    private static string ExceptionDiagnostic(object? value) => value switch
+    {
+        null => "none",
+        Exception exception =>
+            $"{exception.GetType().Name}:{exception.Message}",
+        _ => value.ToString() ?? value.GetType().Name,
+    };
+
+    private static object? PrivateMemberValue(object? source, string name)
+    {
+        if (source is null) return null;
+        const BindingFlags flags = BindingFlags.Instance |
+            BindingFlags.Public | BindingFlags.NonPublic;
+        Type type = source.GetType();
+        return type.GetField(name, flags)?.GetValue(source) ??
+            type.GetProperty(name, flags)?.GetValue(source);
     }
 
     private sealed class MutableSessionCatalog : IRbpLocalSessionCatalog
